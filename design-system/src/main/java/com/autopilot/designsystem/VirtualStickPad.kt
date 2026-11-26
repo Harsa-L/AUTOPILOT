@@ -18,13 +18,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.hypot
@@ -43,6 +45,7 @@ fun VirtualStickPad(
   modifier: Modifier = Modifier,
   size: Dp? = null,
   tag: String = "virtual_stick",
+  hudOverlay: Boolean = false,
   onTouchActiveChanged: (Boolean) -> Unit = {},
 ) {
   val theme = LocalResolvedTheme.current
@@ -52,11 +55,17 @@ fun VirtualStickPad(
   var normX by remember { mutableStateOf(0f) }
   var normY by remember { mutableStateOf(if (autoCenterY) 0f else -0.6f) }
 
-  val trackColor = theme.colors.surfaceGlass.copy(alpha = 0.65f)
-  val ringColor = theme.colors.borderSubtle
-  val crosshairColor = theme.colors.textSecondary.copy(alpha = 0.35f)
+  val trackColor =
+    if (hudOverlay) Color.Black.copy(alpha = 0.22f)
+    else theme.colors.surfaceGlass.copy(alpha = 0.65f)
+  val ringColor =
+    if (hudOverlay) theme.colors.textPrimary.copy(alpha = 0.34f)
+    else theme.colors.borderSubtle
+  val crosshairColor =
+    if (hudOverlay) theme.colors.textPrimary.copy(alpha = 0.20f)
+    else theme.colors.textSecondary.copy(alpha = 0.35f)
   val thumbColor = theme.colors.accent
-  val thumbGlow = theme.colors.accent.copy(alpha = 0.22f)
+  val thumbGlow = theme.colors.accent.copy(alpha = if (hudOverlay) 0.18f else 0.22f)
 
   Column(
     modifier = modifier,
@@ -113,25 +122,25 @@ fun VirtualStickPad(
           color = ringColor,
           radius = outerRadius,
           center = center,
-          style = Stroke(width = 2f),
+          style = Stroke(width = if (hudOverlay) 1.5f else 2f),
         )
         drawCircle(
           color = crosshairColor,
           radius = outerRadius * 0.45f,
           center = center,
-          style = Stroke(width = 1.5f),
+          style = Stroke(width = 1.25f),
         )
         drawLine(
           color = crosshairColor,
           start = Offset(center.x - outerRadius * 0.85f, center.y),
           end = Offset(center.x + outerRadius * 0.85f, center.y),
-          strokeWidth = 1.5f,
+          strokeWidth = 1.25f,
         )
         drawLine(
           color = crosshairColor,
           start = Offset(center.x, center.y - outerRadius * 0.85f),
           end = Offset(center.x, center.y + outerRadius * 0.85f),
-          strokeWidth = 1.5f,
+          strokeWidth = 1.25f,
         )
 
         val thumbPos =
@@ -139,15 +148,19 @@ fun VirtualStickPad(
             x = center.x + normX * travelRadius,
             y = center.y - normY * travelRadius,
           )
-        drawCircle(color = thumbGlow, radius = outerRadius * 0.30f, center = thumbPos)
-        drawCircle(color = thumbColor, radius = outerRadius * 0.19f, center = thumbPos)
+        drawCircle(color = thumbGlow, radius = outerRadius * 0.28f, center = thumbPos)
+        drawCircle(color = thumbColor, radius = outerRadius * 0.18f, center = thumbPos)
       }
     }
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(2.dp))
     Text(
-      text = "$label · ${"%.2f".format(normX)}, ${"%.2f".format(normY)}",
+      text = if (hudOverlay) label else "$label · ${"%.2f".format(normX)}, ${"%.2f".format(normY)}",
       style = MaterialTheme.typography.labelSmall,
-      color = theme.colors.textSecondary,
+      color =
+        if (hudOverlay) theme.colors.textPrimary.copy(alpha = 0.78f)
+        else theme.colors.textSecondary,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
     )
   }
 }

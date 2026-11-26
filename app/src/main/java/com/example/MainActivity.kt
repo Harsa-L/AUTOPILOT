@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
 fun AutopilotAppShell(viewModel: AutopilotViewModel) {
   val navController = rememberNavController()
 
-  Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+  Box(modifier = Modifier.fillMaxSize()) {
     NavHost(
       navController = navController,
       startDestination = AutopilotRoute.Flight,

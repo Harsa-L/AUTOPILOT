@@ -4,6 +4,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -47,7 +49,7 @@ import com.autopilot.designsystem.LocalResolvedTheme
 import com.autopilot.drone.protocolapi.DroneCapabilities
 import com.autopilot.vision.TrackedTarget
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun TargetActionModal(
   target: TrackedTarget,
@@ -279,9 +281,10 @@ fun TargetActionModal(
         tag = "engage_target_action_button",
       )
 
-      Row(
+      FlowRow(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
       ) {
         if (activeTask != null) {
           TextButton(onClick = onStopActiveAction) {
@@ -310,7 +313,12 @@ private fun ParameterSlider(
       modifier = Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-      Text(label, style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+      Text(
+        text = label,
+        style = MaterialTheme.typography.bodySmall,
+        color = theme.colors.textSecondary,
+        modifier = Modifier.weight(1f).padding(end = 8.dp),
+      )
       Text(valueLabel, style = MaterialTheme.typography.labelMedium, color = theme.colors.textPrimary)
     }
     Slider(value = value, onValueChange = onValueChange, valueRange = range)
@@ -329,7 +337,12 @@ private fun ParameterSwitch(
     horizontalArrangement = Arrangement.SpaceBetween,
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Text(label, style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+    Text(
+      text = label,
+      style = MaterialTheme.typography.bodyMedium,
+      color = theme.colors.textPrimary,
+      modifier = Modifier.weight(1f).padding(end = 12.dp),
+    )
     Switch(checked = checked, onCheckedChange = onCheckedChange)
   }
 }

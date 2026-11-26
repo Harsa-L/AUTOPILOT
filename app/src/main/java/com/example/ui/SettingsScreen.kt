@@ -207,9 +207,10 @@ fun SettingsAircraftScreen(
             modifier = Modifier.fillMaxWidth().testTag("host_ip_input"),
           )
           Spacer(Modifier.height(10.dp))
-          Row(
+          FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
           ) {
             AutopilotButton(
               text = "Bind Aircraft Wi-Fi",
@@ -223,7 +224,7 @@ fun SettingsAircraftScreen(
               },
               icon = Icons.Default.Wifi,
               tone = AutopilotButtonTone.SECONDARY,
-              modifier = Modifier.weight(1f),
+              compact = true,
               tag = "bind_drone_ap_button",
             )
             AutopilotButton(
@@ -232,6 +233,7 @@ fun SettingsAircraftScreen(
                 context.startActivity(viewModel.wifiController.createOpenWifiSettingsIntent())
               },
               tone = AutopilotButtonTone.SECONDARY,
+              compact = true,
               tag = "open_wifi_settings_button",
             )
           }
@@ -400,11 +402,13 @@ fun SettingsFlightControlsScreen(
               text = "Attitude Trim",
               style = MaterialTheme.typography.titleMedium,
               color = theme.colors.textPrimary,
+              modifier = Modifier.weight(1f).padding(end = 8.dp),
             )
             AutopilotButton(
               text = "Reset Trim",
               onClick = { viewModel.updateTrim(0f, 0f) },
               tone = AutopilotButtonTone.SECONDARY,
+              compact = true,
               tag = "reset_trim_button",
             )
           }
@@ -600,6 +604,7 @@ fun SettingsLogsScreen(
             onClick = { exportLauncher.launch("autopilot-flight-history.json") },
             icon = Icons.Default.Download,
             tone = AutopilotButtonTone.SECONDARY,
+            compact = true,
             modifier = Modifier.weight(1f),
             tag = "export_logs_button",
           )
@@ -608,6 +613,7 @@ fun SettingsLogsScreen(
             onClick = { viewModel.clearHistory() },
             icon = Icons.Default.DeleteOutline,
             tone = AutopilotButtonTone.SECONDARY,
+            compact = true,
             tag = "clear_logs_button",
           )
         }

@@ -6,42 +6,39 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FlightLand
-import androidx.compose.material.icons.filled.FlightTakeoff
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.RemoveRedEye
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideocamOff
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +47,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,23 +57,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.autopilot.designsystem.AutopilotButton
 import com.autopilot.designsystem.AutopilotButtonTone
-import com.autopilot.designsystem.GlassHudPanel
 import com.autopilot.designsystem.LocalResolvedTheme
 import com.autopilot.designsystem.VirtualStickPad
+import com.autopilot.drone.protocolapi.DroneCapabilities
 import com.autopilot.flight.control.FlightState
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.TrackedTarget
@@ -114,455 +114,364 @@ fun FlightCockpitScreen(
   val isConnected = flightState != FlightState.Disconnected
   val activeFrame = videoState as? VideoStreamState.ActiveFrame
 
-  BoxWithConstraints(
-    modifier = modifier.fillMaxSize().background(theme.colors.canvas),
+  // 100% Full-Screen Video Stream Root with <=30% Translucent Distraction-Free HUD Overlay
+  Box(
+    modifier = modifier.fillMaxSize().background(Color.Black),
   ) {
-    val isLandscape = maxWidth > maxHeight
-    val stickSize = if (isLandscape) 136.dp else 148.dp
-
-    Column(modifier = Modifier.fillMaxSize()) {
-      // Main Video & HUD Stage
-      Box(
-        modifier =
-          Modifier.fillMaxWidth()
-            .weight(1f)
-            .background(theme.colors.canvas)
-            .onSizeChanged { viewportSize = it }
-            .pointerInput(targetSelectionEnabled, viewportSize, activeFrame?.bitmap?.width, activeFrame?.bitmap?.height) {
-              if (!targetSelectionEnabled) return@pointerInput
-              detectTapGestures(
-                onTap = { tap ->
-                  val norm =
-                    mapTapToNormalizedFrame(
-                      tap = tap,
-                      viewport = viewportSize,
-                      frameWidth = activeFrame?.bitmap?.width ?: 0,
-                      frameHeight = activeFrame?.bitmap?.height ?: 0,
-                    )
-                  if (norm != null) {
-                    viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
-                  }
-                },
-                onLongPress = { tap ->
-                  val norm =
-                    mapTapToNormalizedFrame(
-                      tap = tap,
-                      viewport = viewportSize,
-                      frameWidth = activeFrame?.bitmap?.width ?: 0,
-                      frameHeight = activeFrame?.bitmap?.height ?: 0,
-                    )
-                  val currentTargets = visionResult?.trackedTargets.orEmpty()
-                  val hit =
-                    if (norm != null) viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
-                    else null
-                  val selected =
-                    hit ?: selectedTargetId?.let { id -> currentTargets.firstOrNull { it.trackId == id } }
-                  if (selected != null) {
-                    targetModalSubject = selected
-                  }
-                },
-              )
-            },
-      ) {
-        when (val video = videoState) {
-          is VideoStreamState.ActiveFrame -> {
-            Image(
-              bitmap = video.bitmap.asImageBitmap(),
-              contentDescription = "Live aircraft video feed",
-              contentScale = ContentScale.Fit,
-              modifier = Modifier.fillMaxSize(),
+    // Layer 1: 100% Full-Screen Drone Camera Stream & Direct Touch-Target Layer
+    Box(
+      modifier =
+        Modifier.fillMaxSize()
+          .onSizeChanged { viewportSize = it }
+          .pointerInput(
+            targetSelectionEnabled,
+            viewportSize,
+            activeFrame?.bitmap?.width,
+            activeFrame?.bitmap?.height,
+          ) {
+            if (!targetSelectionEnabled) return@pointerInput
+            detectTapGestures(
+              onTap = { tap ->
+                val norm =
+                  mapTapToNormalizedFrame(
+                    tap = tap,
+                    viewport = viewportSize,
+                    frameWidth = activeFrame?.bitmap?.width ?: 0,
+                    frameHeight = activeFrame?.bitmap?.height ?: 0,
+                  )
+                if (norm != null) {
+                  viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
+                }
+              },
+              onLongPress = { tap ->
+                val norm =
+                  mapTapToNormalizedFrame(
+                    tap = tap,
+                    viewport = viewportSize,
+                    frameWidth = activeFrame?.bitmap?.width ?: 0,
+                    frameHeight = activeFrame?.bitmap?.height ?: 0,
+                  )
+                val currentTargets = visionResult?.trackedTargets.orEmpty()
+                val hit =
+                  if (norm != null) viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
+                  else null
+                val selected =
+                  hit ?: selectedTargetId?.let { id -> currentTargets.firstOrNull { it.trackId == id } }
+                if (selected != null) {
+                  targetModalSubject = selected
+                }
+              },
             )
-          }
-          is VideoStreamState.WaitingForKeyframe -> {
-            EmptyVideoViewport(
-              title = "Waiting for Video",
-              detail = "Receiving stream from ${selectedEntry.descriptor.displayName}",
-              modifier = Modifier.align(Alignment.Center),
-            )
-          }
-          is VideoStreamState.Error -> {
-            EmptyVideoViewport(
-              title = "Video Unavailable",
-              detail = video.message,
-              modifier = Modifier.align(Alignment.Center),
-            )
-          }
-          VideoStreamState.Idle -> {
-            EmptyVideoViewport(
-              title = "No Video Feed",
-              detail = "Connect to ${selectedEntry.descriptor.displayName} to begin flight.",
-              modifier = Modifier.align(Alignment.Center),
-            )
-          }
-        }
-
-        // Vision Target Reticles
-        if ((visionEnabled || targetSelectionEnabled) && visionResult != null) {
-          VisionHudOverlay(
-            result = visionResult!!,
-            selectedTargetId = selectedTargetId,
-            activeTask = activeTargetTask,
+          },
+    ) {
+      when (val video = videoState) {
+        is VideoStreamState.ActiveFrame -> {
+          Image(
+            bitmap = video.bitmap.asImageBitmap(),
+            contentDescription = "Live aircraft video feed",
+            contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
           )
         }
-
-        // Minimal Top Control Bar
-        Row(
-          modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(horizontal = 10.dp, vertical = 8.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.weight(1f),
-          ) {
-            // Aircraft selector + status pill
-            Surface(
-              modifier =
-                Modifier.testTag("aircraft_selector_pill")
-                  .clickable { showAircraftSheet = true },
-              shape = RoundedCornerShape(12.dp),
-              color = theme.colors.surfaceGlass.copy(alpha = theme.components.hudBackdropAlpha),
-              border = BorderStroke(1.dp, theme.colors.borderSubtle),
-            ) {
-              Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-              ) {
-                Box(
-                  modifier =
-                    Modifier.size(8.dp)
-                      .clip(CircleShape)
-                      .background(flightStateColor(flightState, theme.colors))
-                )
-                Text(
-                  text = selectedEntry.descriptor.displayName.substringBefore(" ("),
-                  style = MaterialTheme.typography.titleMedium,
-                  color = theme.colors.textPrimary,
-                  maxLines = 1,
-                  overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                  text = "· ${flightStateLabel(flightState)}",
-                  style = MaterialTheme.typography.labelSmall,
-                  color = theme.colors.textSecondary,
-                  maxLines = 1,
-                )
-                Icon(
-                  Icons.Default.ArrowDropDown,
-                  contentDescription = "Select aircraft",
-                  tint = theme.colors.textSecondary,
-                  modifier = Modifier.size(18.dp),
-                )
-              }
-            }
-
-            // Connect / Disconnect pill
-            Surface(
-              modifier =
-                Modifier.testTag("connect_toggle_button")
-                  .clickable {
-                    if (isConnected) viewModel.disconnect()
-                    else viewModel.connectSelectedProtocol()
-                  },
-              shape = RoundedCornerShape(12.dp),
-              color =
-                if (isConnected) theme.colors.surfaceGlass.copy(alpha = theme.components.hudBackdropAlpha)
-                else theme.colors.accent,
-              border =
-                if (isConnected) BorderStroke(1.dp, theme.colors.borderSubtle) else null,
-            ) {
-              Text(
-                text = if (isConnected) "Disconnect" else "Connect",
-                style = MaterialTheme.typography.labelMedium,
-                color = if (isConnected) theme.colors.textPrimary else theme.colors.onAccent,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-              )
-            }
-          }
-
-          // Right Actions: Target Selection Toggle, Vision Page, Settings Page
-          GlassHudPanel {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              IconButton(
-                onClick = { viewModel.toggleTargetSelection(!targetSelectionEnabled) },
-                modifier = Modifier.size(48.dp).testTag("target_select_toggle"),
-              ) {
-                Icon(
-                  Icons.Default.CenterFocusWeak,
-                  contentDescription = "Toggle target selection on video",
-                  tint = if (targetSelectionEnabled) theme.colors.accent else theme.colors.textSecondary,
-                )
-              }
-              IconButton(
-                onClick = onOpenVision,
-                modifier = Modifier.size(48.dp).testTag("open_vision_button"),
-              ) {
-                Icon(
-                  Icons.Default.RemoveRedEye,
-                  contentDescription = "Open Computer Vision",
-                  tint = if (visionEnabled) theme.colors.accent else theme.colors.textPrimary,
-                )
-              }
-              IconButton(
-                onClick = onOpenSettings,
-                modifier = Modifier.size(48.dp).testTag("open_settings_button"),
-              ) {
-                Icon(
-                  Icons.Default.Settings,
-                  contentDescription = "Open Settings",
-                  tint = theme.colors.textPrimary,
-                )
-              }
-            }
-          }
+        is VideoStreamState.WaitingForKeyframe -> {
+          EmptyVideoViewport(
+            title = "Waiting for Video",
+            detail = "Receiving stream from ${selectedEntry.descriptor.displayName}",
+            modifier = Modifier.align(Alignment.Center),
+          )
         }
-
-        // Target Selection Hint or Active Task Pill
-        if (activeTargetTask != null) {
-          val task = activeTargetTask!!
-          GlassHudPanel(modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp)) {
-            Row(
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-              Text(
-                text = "${task.action.title} · #${task.targetId} ${task.targetLabel}",
-                style = MaterialTheme.typography.labelMedium,
-                color = theme.colors.accent,
-              )
-              IconButton(
-                onClick = { viewModel.stopTargetAction() },
-                modifier = Modifier.size(32.dp).testTag("stop_target_action_button"),
-              ) {
-                Icon(
-                  Icons.Default.Close,
-                  contentDescription = "Stop target action",
-                  tint = theme.colors.textPrimary,
-                  modifier = Modifier.size(16.dp),
-                )
-              }
-            }
-          }
-        } else if (targetSelectionEnabled && selectedTargetId != null) {
-          val target = visionResult?.trackedTargets?.firstOrNull { it.trackId == selectedTargetId }
-          if (target != null) {
-            GlassHudPanel(
-              modifier =
-                Modifier.align(Alignment.BottomCenter)
-                  .padding(10.dp)
-                  .clickable { targetModalSubject = target },
-            ) {
-              Text(
-                text = "#${target.trackId} ${target.label} selected · Long-press target for actions",
-                style = MaterialTheme.typography.labelSmall,
-                color = theme.colors.accent,
-              )
-            }
-          }
-        } else if (safetyNotice != null) {
-          GlassHudPanel(modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp)) {
-            Text(
-              text = safetyNotice!!,
-              style = MaterialTheme.typography.labelSmall,
-              color = theme.colors.statusWarning,
-            )
-          }
+        is VideoStreamState.Error -> {
+          EmptyVideoViewport(
+            title = "Video Unavailable",
+            detail = video.message,
+            modifier = Modifier.align(Alignment.Center),
+          )
+        }
+        VideoStreamState.Idle -> {
+          EmptyVideoViewport(
+            title = "No Video Feed",
+            detail = "Tap Connect for ${selectedEntry.descriptor.displayName.substringBefore(" (")}",
+            modifier = Modifier.align(Alignment.Center),
+          )
         }
       }
 
-      // Capability-Driven Flight Modifiers Strip (only genuinely supported controls)
-      Row(
-        modifier =
-          Modifier.fillMaxWidth()
-            .background(theme.colors.surface)
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        if (caps.supportsSpeedTiers) {
-          listOf("Low" to 0, "Med" to 1, "High" to 2).forEach { (label, tier) ->
-            FilterChip(
-              selected = speedTier == tier,
-              onClick = { viewModel.setSpeedTier(tier) },
-              label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-              colors =
-                FilterChipDefaults.filterChipColors(
-                  selectedContainerColor = theme.colors.accent.copy(alpha = 0.2f),
-                  selectedLabelColor = theme.colors.accent,
-                ),
-              modifier = Modifier.testTag("speed_tier_$tier"),
-            )
-          }
-        }
-
-        if (caps.supportsHeadlessMode) {
-          FilterChip(
-            selected = headlessMode,
-            onClick = { viewModel.setHeadlessMode(!headlessMode) },
-            label = { Text("Headless", style = MaterialTheme.typography.labelSmall) },
-            colors =
-              FilterChipDefaults.filterChipColors(
-                selectedContainerColor = theme.colors.accent.copy(alpha = 0.2f),
-                selectedLabelColor = theme.colors.accent,
-              ),
-            modifier = Modifier.testTag("headless_mode_chip"),
-          )
-        }
-
-        if (caps.supportsCameraTilt) {
-          Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = theme.colors.surfaceElevated,
-            border = BorderStroke(1.dp, theme.colors.borderSubtle),
-          ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              IconButton(
-                onClick = { viewModel.tiltCamera(-1) },
-                enabled = isConnected,
-                modifier = Modifier.size(40.dp).testTag("camera_tilt_down_button"),
-              ) {
-                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Tilt camera down")
-              }
-              Text(
-                text = "Tilt",
-                style = MaterialTheme.typography.labelSmall,
-                color = theme.colors.textSecondary,
-              )
-              IconButton(
-                onClick = { viewModel.tiltCamera(1) },
-                enabled = isConnected,
-                modifier = Modifier.size(40.dp).testTag("camera_tilt_up_button"),
-              ) {
-                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Tilt camera up")
-              }
-            }
-          }
-        }
-
-        if (caps.supportsGyroCalibration) {
-          FilterChip(
-            selected = false,
-            onClick = { viewModel.commandCalibrateGyro() },
-            enabled = isConnected,
-            label = { Text("Cal Gyro", style = MaterialTheme.typography.labelSmall) },
-            modifier = Modifier.testTag("calibrate_gyro_chip"),
-          )
-        }
-
-        FilterChip(
-          selected = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
-          onClick = { showTrimDialog = true },
-          leadingIcon = {
-            Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
-          },
-          label = { Text("Trim", style = MaterialTheme.typography.labelSmall) },
-          modifier = Modifier.testTag("trim_button"),
+      if ((visionEnabled || targetSelectionEnabled) && visionResult != null) {
+        VisionHudOverlay(
+          result = visionResult!!,
+          frameWidth = activeFrame?.bitmap?.width ?: 0,
+          frameHeight = activeFrame?.bitmap?.height ?: 0,
+          selectedTargetId = selectedTargetId,
+          activeTask = activeTargetTask,
+          modifier = Modifier.fillMaxSize(),
         )
       }
+    }
 
-      // Ergonomic Dual-Stick & Primary Flight Deck
+    // Layer 2: Safe-Area Bounded Translucent Flight HUD Overlay (<=30% area, >=70% clear video, zero scrolling)
+    BoxWithConstraints(
+      modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
+      val isWideLayout = maxWidth >= 560.dp
+      val isShortHeight = maxHeight < 480.dp
+
+      val stickSize =
+        if (isWideLayout) {
+          if (isShortHeight) {
+            (maxHeight * 0.30f).coerceIn(88.dp, 114.dp)
+          } else {
+            minOf(maxHeight * 0.24f, maxWidth * 0.18f).coerceIn(112.dp, 148.dp)
+          }
+        } else {
+          minOf(maxHeight * 0.16f, (maxWidth - 40.dp) * 0.36f).coerceIn(88.dp, 132.dp)
+        }
+
+      // Top Minimal Translucent HUD Row (No Title Bar)
       Row(
         modifier =
           Modifier.fillMaxWidth()
-            .background(theme.colors.surface)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .align(Alignment.TopCenter)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        VirtualStickPad(
-          label = "THR / YAW",
-          horizontalAxisLabel = "Yaw",
-          verticalAxisLabel = "Throttle",
-          autoCenterY = false,
-          onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
-          onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-          size = stickSize,
-          tag = "left_stick_pad",
-        )
-
-        Column(
-          modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-          horizontalAlignment = Alignment.CenterHorizontally,
-          verticalArrangement = Arrangement.spacedBy(8.dp),
+        Row(
+          modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp).testTag("hud_top_left"),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalAlignment = Alignment.CenterVertically,
         ) {
-          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (flightState == FlightState.Armed) {
-              if (caps.supportsTakeoff) {
-                AutopilotButton(
-                  text = "Takeoff",
-                  onClick = { viewModel.commandTakeoff() },
-                  icon = Icons.Default.FlightTakeoff,
-                  tag = "takeoff_button",
-                )
-              }
-            } else {
-              AutopilotButton(
-                text = if (flightState == FlightState.Emergency) "Reset" else "Arm",
-                onClick = {
-                  if (flightState == FlightState.Emergency) viewModel.disarmAircraft()
-                  else viewModel.armAircraft()
-                },
-                enabled =
-                  flightState == FlightState.Ready ||
-                    flightState == FlightState.Connected ||
-                    flightState == FlightState.Emergency,
-                icon = Icons.Default.Shield,
-                tone = AutopilotButtonTone.SECONDARY,
-                tag = "arm_button",
-              )
-            }
+          HudAircraftPill(
+            aircraftName = selectedEntry.descriptor.displayName.substringBefore(" ("),
+            flightState = flightState,
+            onClick = { showAircraftSheet = true },
+            modifier = Modifier.weight(1f, fill = false),
+          )
 
-            if (caps.supportsControlledLanding) {
-              AutopilotButton(
-                text = "Land",
-                onClick = { viewModel.commandControlledLand() },
-                enabled = isConnected,
-                icon = Icons.Default.FlightLand,
-                tone = AutopilotButtonTone.SECONDARY,
-                tag = "controlled_land_button",
-              )
-            }
-          }
+          HudConnectPill(
+            isConnected = isConnected,
+            onClick = {
+              if (isConnected) viewModel.disconnect()
+              else viewModel.connectSelectedProtocol()
+            },
+          )
+        }
 
-          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (caps.supportsMotorStop) {
-              AutopilotButton(
-                text = "Stop",
-                onClick = { viewModel.commandMotorStop() },
-                enabled = isConnected,
-                icon = Icons.Default.PowerSettingsNew,
-                tone = AutopilotButtonTone.WARNING,
-                tag = "motor_stop_button",
-              )
-            }
+        HudTopIconCluster(
+          targetSelectionEnabled = targetSelectionEnabled,
+          visionEnabled = visionEnabled,
+          onToggleTargetSelect = { viewModel.toggleTargetSelection(!targetSelectionEnabled) },
+          onOpenVision = onOpenVision,
+          onOpenSettings = onOpenSettings,
+          modifier = Modifier.testTag("hud_top_right"),
+        )
+      }
 
-            if (caps.supportsEmergencyMotorStop) {
-              AutopilotButton(
-                text = "E-STOP",
-                onClick = { showEmergencyDialog = true },
-                enabled = isConnected,
-                icon = Icons.Default.Warning,
-                tone = AutopilotButtonTone.EMERGENCY,
-                tag = "emergency_stop_button",
+      // Transient Micro-Banner directly below top cluster (only when active target or alert exists)
+      val topStatusBannerModifier =
+        Modifier.align(Alignment.TopCenter)
+          .padding(top = 54.dp, start = 12.dp, end = 12.dp)
+          .widthIn(max = 380.dp)
+
+      if (activeTargetTask != null) {
+        val task = activeTargetTask!!
+        HudTranslucentPill(modifier = topStatusBannerModifier) {
+          Row(
+            modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Text(
+              text = "${task.action.title} · #${task.targetId} ${task.targetLabel}",
+              style = MaterialTheme.typography.labelSmall,
+              color = theme.colors.accent,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f, fill = false),
+            )
+            IconButton(
+              onClick = { viewModel.stopTargetAction() },
+              modifier = Modifier.size(30.dp).minimumInteractiveComponentSize().testTag("stop_target_action_button"),
+            ) {
+              Icon(
+                Icons.Default.Close,
+                contentDescription = "Stop target action",
+                tint = Color.White,
+                modifier = Modifier.size(14.dp),
               )
             }
           }
         }
+      } else if (targetSelectionEnabled && selectedTargetId != null) {
+        val target = visionResult?.trackedTargets?.firstOrNull { it.trackId == selectedTargetId }
+        if (target != null) {
+          HudTranslucentPill(
+            modifier = topStatusBannerModifier.clickable { targetModalSubject = target },
+          ) {
+            Text(
+              text = "#${target.trackId} ${target.label} · Long-press for actions",
+              style = MaterialTheme.typography.labelSmall,
+              color = theme.colors.accent,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+          }
+        }
+      } else if (safetyNotice != null) {
+        HudTranslucentPill(modifier = topStatusBannerModifier) {
+          Text(
+            text = safetyNotice!!,
+            style = MaterialTheme.typography.labelSmall,
+            color = theme.colors.statusWarning,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          )
+        }
+      }
 
-        VirtualStickPad(
-          label = "ROLL / PITCH",
-          horizontalAxisLabel = "Roll",
-          verticalAxisLabel = "Pitch",
-          autoCenterY = true,
-          onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
-          onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-          size = stickSize,
-          tag = "right_stick_pad",
-        )
+      // Bottom Translucent HUD Controls (All visible at once, zero scrolling, no opaque cockpit box)
+      if (isWideLayout) {
+        Row(
+          modifier =
+            Modifier.fillMaxWidth()
+              .align(Alignment.BottomCenter)
+              .padding(horizontal = 10.dp, vertical = 6.dp),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.Bottom,
+        ) {
+          VirtualStickPad(
+            label = "THR / YAW",
+            horizontalAxisLabel = "Yaw",
+            verticalAxisLabel = "Throttle",
+            autoCenterY = false,
+            onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
+            onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+            size = stickSize,
+            hudOverlay = true,
+            tag = "left_stick_pad",
+          )
+
+          Box(
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            contentAlignment = Alignment.BottomCenter,
+          ) {
+            Column(
+              modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(),
+              horizontalAlignment = Alignment.CenterHorizontally,
+              verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              HudCapabilityModifiersRow(
+                caps = caps,
+                speedTier = speedTier,
+                headlessMode = headlessMode,
+                isConnected = isConnected,
+                trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
+                onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
+                onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
+                onTiltCamera = { viewModel.tiltCamera(it) },
+                onCalibrateGyro = { viewModel.commandCalibrateGyro() },
+                onOpenTrim = { showTrimDialog = true },
+                modifier = Modifier.fillMaxWidth().testTag("hud_modifiers_row"),
+              )
+
+              HudPrimaryActionsRow(
+                flightState = flightState,
+                caps = caps,
+                isConnected = isConnected,
+                onArmOrReset = {
+                  if (flightState == FlightState.Emergency) viewModel.disarmAircraft()
+                  else viewModel.armAircraft()
+                },
+                onTakeoff = { viewModel.commandTakeoff() },
+                onLand = { viewModel.commandControlledLand() },
+                onStop = { viewModel.commandMotorStop() },
+                onEmergencyClick = { showEmergencyDialog = true },
+                modifier = Modifier.fillMaxWidth().testTag("hud_actions_row"),
+              )
+            }
+          }
+
+          VirtualStickPad(
+            label = "ROLL / PITCH",
+            horizontalAxisLabel = "Roll",
+            verticalAxisLabel = "Pitch",
+            autoCenterY = true,
+            onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
+            onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+            size = stickSize,
+            hudOverlay = true,
+            tag = "right_stick_pad",
+          )
+        }
+      } else {
+        // Portrait Compact Overlay: Modifiers + Primary Flight Actions + Dual Translucent Sticks
+        Column(
+          modifier =
+            Modifier.fillMaxWidth()
+              .align(Alignment.BottomCenter)
+              .padding(horizontal = 8.dp, vertical = 6.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          HudCapabilityModifiersRow(
+            caps = caps,
+            speedTier = speedTier,
+            headlessMode = headlessMode,
+            isConnected = isConnected,
+            trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
+            onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
+            onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
+            onTiltCamera = { viewModel.tiltCamera(it) },
+            onCalibrateGyro = { viewModel.commandCalibrateGyro() },
+            onOpenTrim = { showTrimDialog = true },
+            modifier = Modifier.fillMaxWidth().testTag("hud_modifiers_row"),
+          )
+
+          HudPrimaryActionsRow(
+            flightState = flightState,
+            caps = caps,
+            isConnected = isConnected,
+            onArmOrReset = {
+              if (flightState == FlightState.Emergency) viewModel.disarmAircraft()
+              else viewModel.armAircraft()
+            },
+            onTakeoff = { viewModel.commandTakeoff() },
+            onLand = { viewModel.commandControlledLand() },
+            onStop = { viewModel.commandMotorStop() },
+            onEmergencyClick = { showEmergencyDialog = true },
+            modifier = Modifier.fillMaxWidth().testTag("hud_actions_row"),
+          )
+
+          Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+          ) {
+            VirtualStickPad(
+              label = "THR / YAW",
+              horizontalAxisLabel = "Yaw",
+              verticalAxisLabel = "Throttle",
+              autoCenterY = false,
+              onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
+              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+              size = stickSize,
+              hudOverlay = true,
+              tag = "left_stick_pad",
+            )
+
+            VirtualStickPad(
+              label = "ROLL / PITCH",
+              horizontalAxisLabel = "Roll",
+              verticalAxisLabel = "Pitch",
+              autoCenterY = true,
+              onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
+              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+              size = stickSize,
+              hudOverlay = true,
+              tag = "right_stick_pad",
+            )
+          }
+        }
       }
     }
   }
@@ -601,11 +510,11 @@ fun FlightCockpitScreen(
     ) {
       Column(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
       ) {
         Text(
           text = "Select Aircraft",
-          style = MaterialTheme.typography.titleLarge,
+          style = MaterialTheme.typography.titleMedium,
           color = theme.colors.textPrimary,
         )
         viewModel.productionProtocols.forEach { entry ->
@@ -619,7 +528,7 @@ fun FlightCockpitScreen(
                   viewModel.selectProtocol(desc.id)
                   showAircraftSheet = false
                 },
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(10.dp),
             color = if (isCurrent) theme.colors.surfaceElevated else theme.colors.surface,
             border =
               BorderStroke(
@@ -627,15 +536,22 @@ fun FlightCockpitScreen(
                 color = if (isCurrent) theme.colors.accent else theme.colors.borderSubtle,
               ),
           ) {
-            Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+              modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
               Text(
                 text = desc.displayName,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.bodyMedium,
                 color = theme.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
               )
               Text(
-                text = desc.knownModels.joinToString(", "),
-                style = MaterialTheme.typography.bodySmall,
+                text = desc.knownModels.firstOrNull().orEmpty(),
+                style = MaterialTheme.typography.labelSmall,
                 color = theme.colors.textSecondary,
               )
             }
@@ -708,6 +624,469 @@ fun FlightCockpitScreen(
   }
 }
 
+@Composable
+private fun HudTranslucentPill(
+  modifier: Modifier = Modifier,
+  highlighted: Boolean = false,
+  fillColor: Color? = null,
+  borderColor: Color? = null,
+  content: @Composable () -> Unit,
+) {
+  val theme = LocalResolvedTheme.current
+  val bg =
+    fillColor
+      ?: if (highlighted) theme.colors.accent.copy(alpha = 0.28f)
+      else Color.Black.copy(alpha = 0.36f)
+  val stroke =
+    borderColor
+      ?: if (highlighted) theme.colors.accent.copy(alpha = 0.72f)
+      else Color.White.copy(alpha = 0.18f)
+
+  Surface(
+    modifier = modifier,
+    shape = RoundedCornerShape(10.dp),
+    color = bg,
+    border = BorderStroke(0.75.dp, stroke),
+  ) {
+    content()
+  }
+}
+
+@Composable
+private fun HudAircraftPill(
+  aircraftName: String,
+  flightState: FlightState,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val theme = LocalResolvedTheme.current
+  HudTranslucentPill(
+    modifier =
+      modifier
+        .testTag("aircraft_selector_pill")
+        .defaultMinSize(minHeight = 38.dp)
+        .clickable(onClick = onClick),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+      Box(
+        modifier =
+          Modifier.size(7.dp)
+            .clip(CircleShape)
+            .background(flightStateColor(flightState, theme.colors))
+      )
+      Text(
+        text = aircraftName,
+        style = MaterialTheme.typography.labelMedium,
+        color = Color.White,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f, fill = false),
+      )
+      Icon(
+        Icons.Default.ArrowDropDown,
+        contentDescription = "Select aircraft",
+        tint = Color.White.copy(alpha = 0.75f),
+        modifier = Modifier.size(16.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun HudConnectPill(
+  isConnected: Boolean,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val theme = LocalResolvedTheme.current
+  HudTranslucentPill(
+    modifier =
+      modifier
+        .testTag("connect_toggle_button")
+        .defaultMinSize(minHeight = 38.dp)
+        .clickable(onClick = onClick),
+    fillColor =
+      if (isConnected) Color.Black.copy(alpha = 0.38f)
+      else theme.colors.accent.copy(alpha = 0.84f),
+    borderColor =
+      if (isConnected) theme.colors.accent.copy(alpha = 0.65f)
+      else theme.colors.accent,
+  ) {
+    Box(
+      contentAlignment = Alignment.Center,
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+      Text(
+        text = if (isConnected) "Disconnect" else "Connect",
+        style = MaterialTheme.typography.labelMedium,
+        color = if (isConnected) Color.White else theme.colors.onAccent,
+        maxLines = 1,
+      )
+    }
+  }
+}
+
+@Composable
+private fun HudTopIconCluster(
+  targetSelectionEnabled: Boolean,
+  visionEnabled: Boolean,
+  onToggleTargetSelect: () -> Unit,
+  onOpenVision: () -> Unit,
+  onOpenSettings: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val theme = LocalResolvedTheme.current
+  HudTranslucentPill(modifier = modifier) {
+    Row(
+      modifier = Modifier.padding(horizontal = 2.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      IconButton(
+        onClick = onToggleTargetSelect,
+        modifier = Modifier.size(40.dp).minimumInteractiveComponentSize().testTag("target_select_toggle"),
+      ) {
+        Icon(
+          Icons.Default.CenterFocusWeak,
+          contentDescription = "Toggle target selection on video",
+          tint = if (targetSelectionEnabled) theme.colors.accent else Color.White.copy(alpha = 0.85f),
+          modifier = Modifier.size(19.dp),
+        )
+      }
+      IconButton(
+        onClick = onOpenVision,
+        modifier = Modifier.size(40.dp).minimumInteractiveComponentSize().testTag("open_vision_button"),
+      ) {
+        Icon(
+          Icons.Default.RemoveRedEye,
+          contentDescription = "Open Computer Vision",
+          tint = if (visionEnabled) theme.colors.accent else Color.White.copy(alpha = 0.85f),
+          modifier = Modifier.size(19.dp),
+        )
+      }
+      IconButton(
+        onClick = onOpenSettings,
+        modifier = Modifier.size(40.dp).minimumInteractiveComponentSize().testTag("open_settings_button"),
+      ) {
+        Icon(
+          Icons.Default.Settings,
+          contentDescription = "Open Settings",
+          tint = Color.White.copy(alpha = 0.85f),
+          modifier = Modifier.size(19.dp),
+        )
+      }
+    }
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun HudCapabilityModifiersRow(
+  caps: DroneCapabilities,
+  speedTier: Int,
+  headlessMode: Boolean,
+  isConnected: Boolean,
+  trimActive: Boolean,
+  onCycleSpeedTier: () -> Unit,
+  onToggleHeadless: () -> Unit,
+  onTiltCamera: (Int) -> Unit,
+  onCalibrateGyro: () -> Unit,
+  onOpenTrim: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val theme = LocalResolvedTheme.current
+  FlowRow(
+    modifier = modifier,
+    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+    verticalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    if (caps.supportsSpeedTiers) {
+      val speedLabel = when (speedTier) {
+        0 -> "Spd L"
+        1 -> "Spd M"
+        else -> "Spd H"
+      }
+      HudOverlayMiniButton(
+        label = speedLabel,
+        active = speedTier > 0,
+        onClick = onCycleSpeedTier,
+        tag = "speed_tier_cycle",
+      )
+    }
+
+    if (caps.supportsHeadlessMode) {
+      HudOverlayMiniButton(
+        label = "Hdls",
+        active = headlessMode,
+        onClick = onToggleHeadless,
+        icon = Icons.Default.Explore,
+        tag = "headless_mode_chip",
+      )
+    }
+
+    if (caps.supportsCameraTilt) {
+      HudTranslucentPill {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          IconButton(
+            onClick = { onTiltCamera(-1) },
+            enabled = isConnected,
+            modifier = Modifier.size(32.dp).testTag("camera_tilt_down_button"),
+          ) {
+            Icon(
+              Icons.Default.KeyboardArrowDown,
+              contentDescription = "Tilt camera down",
+              tint = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
+              modifier = Modifier.size(16.dp),
+            )
+          }
+          Text(
+            text = "Tilt",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.85f),
+          )
+          IconButton(
+            onClick = { onTiltCamera(1) },
+            enabled = isConnected,
+            modifier = Modifier.size(32.dp).testTag("camera_tilt_up_button"),
+          ) {
+            Icon(
+              Icons.Default.KeyboardArrowUp,
+              contentDescription = "Tilt camera up",
+              tint = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
+              modifier = Modifier.size(16.dp),
+            )
+          }
+        }
+      }
+    }
+
+    if (caps.supportsGyroCalibration) {
+      HudOverlayMiniButton(
+        label = "Gyro",
+        enabled = isConnected,
+        onClick = onCalibrateGyro,
+        tag = "calibrate_gyro_chip",
+      )
+    }
+
+    HudOverlayMiniButton(
+      label = "Trim",
+      active = trimActive,
+      onClick = onOpenTrim,
+      icon = Icons.Default.Tune,
+      tag = "trim_button",
+      activeColor = theme.colors.accent,
+    )
+  }
+}
+
+@Composable
+private fun HudOverlayMiniButton(
+  label: String,
+  onClick: () -> Unit,
+  tag: String,
+  enabled: Boolean = true,
+  active: Boolean = false,
+  icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+  activeColor: Color? = null,
+) {
+  val theme = LocalResolvedTheme.current
+  val accent = activeColor ?: theme.colors.accent
+  HudTranslucentPill(
+    highlighted = active,
+    modifier =
+      Modifier.testTag(tag)
+        .defaultMinSize(minHeight = 32.dp)
+        .clickable(enabled = enabled, onClick = onClick),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+      if (icon != null) {
+        Icon(
+          imageVector = icon,
+          contentDescription = null,
+          tint =
+            when {
+              !enabled -> Color.White.copy(alpha = 0.4f)
+              active -> accent
+              else -> Color.White.copy(alpha = 0.85f)
+            },
+          modifier = Modifier.size(14.dp),
+        )
+      }
+      Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        color =
+          when {
+            !enabled -> Color.White.copy(alpha = 0.4f)
+            active -> accent
+            else -> Color.White.copy(alpha = 0.9f)
+          },
+        maxLines = 1,
+      )
+    }
+  }
+}
+
+@Composable
+private fun HudPrimaryActionsRow(
+  flightState: FlightState,
+  caps: DroneCapabilities,
+  isConnected: Boolean,
+  onArmOrReset: () -> Unit,
+  onTakeoff: () -> Unit,
+  onLand: () -> Unit,
+  onStop: () -> Unit,
+  onEmergencyClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val theme = LocalResolvedTheme.current
+  Row(
+    modifier = modifier,
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    if (flightState == FlightState.Armed && caps.supportsTakeoff) {
+      HudActionButton(
+        text = "Takeoff",
+        onClick = onTakeoff,
+        fillColor = theme.colors.accent.copy(alpha = 0.85f),
+        borderColor = theme.colors.accent,
+        textColor = theme.colors.onAccent,
+        modifier = Modifier.weight(1f),
+        tag = "takeoff_button",
+      )
+    } else {
+      val armEnabled =
+        flightState == FlightState.Ready ||
+          flightState == FlightState.Connected ||
+          flightState == FlightState.Emergency
+      HudActionButton(
+        text = if (flightState == FlightState.Emergency) "Reset" else "Arm",
+        enabled = armEnabled,
+        onClick = onArmOrReset,
+        fillColor = Color.Black.copy(alpha = 0.38f),
+        borderColor = if (armEnabled) theme.colors.accent.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.14f),
+        textColor = if (armEnabled) Color.White else Color.White.copy(alpha = 0.4f),
+        modifier = Modifier.weight(1f),
+        tag = "arm_button",
+      )
+    }
+
+    if (caps.supportsControlledLanding) {
+      HudActionButton(
+        text = "Land",
+        enabled = isConnected,
+        onClick = onLand,
+        fillColor = Color.Black.copy(alpha = 0.38f),
+        borderColor = Color.White.copy(alpha = if (isConnected) 0.24f else 0.12f),
+        textColor = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
+        modifier = Modifier.weight(1f),
+        tag = "controlled_land_button",
+      )
+    }
+
+    if (caps.supportsMotorStop) {
+      HudActionButton(
+        text = "Stop",
+        enabled = isConnected,
+        onClick = onStop,
+        fillColor = theme.colors.statusWarning.copy(alpha = if (isConnected) 0.34f else 0.16f),
+        borderColor = theme.colors.statusWarning.copy(alpha = if (isConnected) 0.72f else 0.28f),
+        textColor = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
+        modifier = Modifier.weight(1f),
+        tag = "motor_stop_button",
+      )
+    }
+
+    if (caps.supportsEmergencyMotorStop) {
+      HudActionButton(
+        text = "E-STOP",
+        enabled = isConnected,
+        onClick = onEmergencyClick,
+        fillColor = theme.colors.statusEmergency.copy(alpha = if (isConnected) 0.44f else 0.18f),
+        borderColor = theme.colors.statusEmergency.copy(alpha = if (isConnected) 0.82f else 0.30f),
+        textColor = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
+        modifier = Modifier.weight(1f),
+        tag = "emergency_stop_button",
+      )
+    }
+  }
+}
+
+@Composable
+private fun HudActionButton(
+  text: String,
+  onClick: () -> Unit,
+  fillColor: Color,
+  borderColor: Color,
+  textColor: Color,
+  tag: String,
+  modifier: Modifier = Modifier,
+  enabled: Boolean = true,
+) {
+  Surface(
+    modifier =
+      modifier
+        .testTag(tag)
+        .defaultMinSize(minHeight = 44.dp)
+        .clickable(enabled = enabled, onClick = onClick),
+    shape = RoundedCornerShape(10.dp),
+    color = fillColor,
+    border = BorderStroke(0.85.dp, borderColor),
+  ) {
+    Box(
+      contentAlignment = Alignment.Center,
+      modifier = Modifier.padding(horizontal = 6.dp, vertical = 10.dp),
+    ) {
+      Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = textColor,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+  }
+}
+
+private fun computeCropVideoDrawRect(
+  viewportWidth: Float,
+  viewportHeight: Float,
+  frameWidth: Int,
+  frameHeight: Int,
+): Rect {
+  if (viewportWidth <= 0f || viewportHeight <= 0f) return Rect.Zero
+  if (frameWidth <= 0 || frameHeight <= 0) {
+    return Rect(0f, 0f, viewportWidth, viewportHeight)
+  }
+  val viewAspect = viewportWidth / viewportHeight
+  val frameAspect = frameWidth.toFloat() / frameHeight.toFloat()
+  val renderedW: Float
+  val renderedH: Float
+  val offsetX: Float
+  val offsetY: Float
+  if (frameAspect > viewAspect) {
+    renderedH = viewportHeight
+    renderedW = renderedH * frameAspect
+    offsetX = (viewportWidth - renderedW) / 2f
+    offsetY = 0f
+  } else {
+    renderedW = viewportWidth
+    renderedH = renderedW / frameAspect
+    offsetX = 0f
+    offsetY = (viewportHeight - renderedH) / 2f
+  }
+  return Rect(offsetX, offsetY, offsetX + renderedW, offsetY + renderedH)
+}
+
 private fun mapTapToNormalizedFrame(
   tap: Offset,
   viewport: IntSize,
@@ -715,32 +1094,16 @@ private fun mapTapToNormalizedFrame(
   frameHeight: Int,
 ): Offset? {
   if (viewport.width <= 0 || viewport.height <= 0) return null
-  if (frameWidth <= 0 || frameHeight <= 0) {
-    return Offset(
-      x = (tap.x / viewport.width).coerceIn(0f, 1f),
-      y = (tap.y / viewport.height).coerceIn(0f, 1f),
+  val rect =
+    computeCropVideoDrawRect(
+      viewportWidth = viewport.width.toFloat(),
+      viewportHeight = viewport.height.toFloat(),
+      frameWidth = frameWidth,
+      frameHeight = frameHeight,
     )
-  }
-  val viewAspect = viewport.width.toFloat() / viewport.height.toFloat()
-  val frameAspect = frameWidth.toFloat() / frameHeight.toFloat()
-  val renderedW: Float
-  val renderedH: Float
-  val offsetX: Float
-  val offsetY: Float
-  if (frameAspect > viewAspect) {
-    renderedW = viewport.width.toFloat()
-    renderedH = renderedW / frameAspect
-    offsetX = 0f
-    offsetY = (viewport.height - renderedH) / 2f
-  } else {
-    renderedH = viewport.height.toFloat()
-    renderedW = renderedH * frameAspect
-    offsetX = (viewport.width - renderedW) / 2f
-    offsetY = 0f
-  }
-  val nx = (tap.x - offsetX) / renderedW
-  val ny = (tap.y - offsetY) / renderedH
-  if (nx !in 0f..1f || ny !in 0f..1f) return null
+  if (rect.width <= 0f || rect.height <= 0f) return null
+  val nx = ((tap.x - rect.left) / rect.width).coerceIn(0f, 1f)
+  val ny = ((tap.y - rect.top) / rect.height).coerceIn(0f, 1f)
   return Offset(nx, ny)
 }
 
@@ -750,27 +1113,30 @@ private fun EmptyVideoViewport(
   detail: String,
   modifier: Modifier = Modifier,
 ) {
-  val theme = LocalResolvedTheme.current
   Column(
-    modifier = modifier.padding(24.dp),
+    modifier = modifier.padding(horizontal = 32.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
-    verticalArrangement = Arrangement.spacedBy(6.dp),
+    verticalArrangement = Arrangement.spacedBy(4.dp),
   ) {
     Icon(
       Icons.Default.VideocamOff,
       contentDescription = null,
-      tint = theme.colors.textSecondary,
-      modifier = Modifier.size(34.dp),
+      tint = Color.White.copy(alpha = 0.45f),
+      modifier = Modifier.size(30.dp),
     )
     Text(
       text = title,
-      style = MaterialTheme.typography.titleMedium,
-      color = theme.colors.textPrimary,
+      style = MaterialTheme.typography.titleSmall,
+      color = Color.White.copy(alpha = 0.85f),
+      textAlign = TextAlign.Center,
     )
     Text(
       text = detail,
       style = MaterialTheme.typography.bodySmall,
-      color = theme.colors.textSecondary,
+      color = Color.White.copy(alpha = 0.55f),
+      textAlign = TextAlign.Center,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
     )
   }
 }
@@ -778,22 +1144,25 @@ private fun EmptyVideoViewport(
 @Composable
 private fun VisionHudOverlay(
   result: VisionFrameResult,
+  frameWidth: Int,
+  frameHeight: Int,
   selectedTargetId: Int?,
   activeTask: ActiveTargetTask?,
   modifier: Modifier = Modifier,
 ) {
   val theme = LocalResolvedTheme.current
-  val defaultBoxColor = theme.colors.textSecondary.copy(alpha = 0.72f)
+  val defaultBoxColor = Color.White.copy(alpha = 0.72f)
   val selectedColor = theme.colors.accent
 
   Box(modifier = modifier) {
     Canvas(modifier = Modifier.fillMaxSize()) {
+      val drawRect = computeCropVideoDrawRect(size.width, size.height, frameWidth, frameHeight)
       result.trackedTargets.forEach { target ->
         val isSelected = target.trackId == selectedTargetId
-        val l = target.boxNormalized.left * size.width
-        val t = target.boxNormalized.top * size.height
-        val w = (target.boxNormalized.right - target.boxNormalized.left) * size.width
-        val h = (target.boxNormalized.bottom - target.boxNormalized.top) * size.height
+        val l = drawRect.left + target.boxNormalized.left * drawRect.width
+        val t = drawRect.top + target.boxNormalized.top * drawRect.height
+        val w = (target.boxNormalized.right - target.boxNormalized.left) * drawRect.width
+        val h = (target.boxNormalized.bottom - target.boxNormalized.top) * drawRect.height
         val color = if (isSelected) selectedColor else defaultBoxColor
         drawRect(
           color = color,
@@ -806,7 +1175,10 @@ private fun VisionHudOverlay(
 
     if (result.trackedTargets.isNotEmpty()) {
       Column(
-        modifier = Modifier.align(Alignment.TopStart).padding(top = 64.dp, start = 10.dp),
+        modifier =
+          Modifier.align(Alignment.TopStart)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(top = 56.dp, start = 10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
       ) {
         result.trackedTargets.take(3).forEach { target ->
@@ -814,11 +1186,12 @@ private fun VisionHudOverlay(
           val distStr = target.estimatedDistanceMeters?.let { " · ${"%.1f".format(it)}m" } ?: ""
           val taskTag =
             if (activeTask?.targetId == target.trackId) " · ${activeTask.action.title}" else ""
-          GlassHudPanel {
+          HudTranslucentPill {
             Text(
               text = "#${target.trackId} ${target.label}$distStr$taskTag",
               style = MaterialTheme.typography.labelSmall,
-              color = if (isSelected) theme.colors.accent else theme.colors.textPrimary,
+              color = if (isSelected) theme.colors.accent else Color.White,
+              modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             )
           }
         }
@@ -842,20 +1215,4 @@ private fun flightStateColor(
     is FlightState.TakingOff,
     is FlightState.Landing -> colors.statusWarning
     else -> colors.textSecondary
-  }
-
-private fun flightStateLabel(state: FlightState): String =
-  when (state) {
-    FlightState.Disconnected -> "Idle"
-    FlightState.Discovering -> "Searching"
-    FlightState.Connecting -> "Connecting"
-    FlightState.Connected -> "Connected"
-    FlightState.Ready -> "Ready"
-    FlightState.Armed -> "Armed"
-    FlightState.TakingOff -> "Takeoff"
-    FlightState.Flying -> "Flying"
-    FlightState.Landing -> "Landing"
-    FlightState.Emergency -> "E-Stop"
-    is FlightState.ConnectionLost -> "Link Lost"
-    is FlightState.Fault -> "Fault"
   }

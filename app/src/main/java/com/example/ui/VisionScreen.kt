@@ -363,6 +363,7 @@ private fun CapabilityRow(label: String, supported: Boolean) {
       text = label,
       style = MaterialTheme.typography.bodySmall,
       color = theme.colors.textPrimary,
+      modifier = Modifier.weight(1f).padding(end = 12.dp),
     )
     Text(
       text = if (supported) "Supported" else "Unsupported",

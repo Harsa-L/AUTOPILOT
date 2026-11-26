@@ -1,10 +1,19 @@
 package com.example
 
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertWidthIsAtLeast
+import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -54,5 +63,72 @@ class AutopilotRobolectricTest {
     composeRule.waitForIdle()
 
     composeRule.onNodeWithTag("left_stick_pad").assertIsDisplayed()
+  }
+
+  @Test
+  @Config(sdk = [36], qualifiers = "w360dp-h740dp-port")
+  fun `galaxy s9 portrait hud leaves at least 70 percent video clear with zero scrolling`() {
+    composeRule.waitForIdle()
+    assertHudConstraints(minStickDp = 104f)
+  }
+
+  @Test
+  @Config(sdk = [36], qualifiers = "w740dp-h360dp-land")
+  fun `galaxy s9 landscape hud leaves at least 70 percent video clear with zero scrolling`() {
+    composeRule.waitForIdle()
+    assertHudConstraints(minStickDp = 88f)
+  }
+
+  private fun assertHudConstraints(minStickDp: Float) {
+    // Zero scrollable elements allowed on Flight HUD
+    val scrollableNodes = composeRule.onAllNodes(hasScrollAction()).fetchSemanticsNodes()
+    assertTrue("Expected zero scrollable nodes on Flight HUD, found ${scrollableNodes.size}", scrollableNodes.isEmpty())
+
+    // All primary and capability controls visible simultaneously
+    listOf(
+      "aircraft_selector_pill",
+      "connect_toggle_button",
+      "target_select_toggle",
+      "open_vision_button",
+      "open_settings_button",
+      "speed_tier_cycle",
+      "headless_mode_chip",
+      "calibrate_gyro_chip",
+      "trim_button",
+      "arm_button",
+      "controlled_land_button",
+      "motor_stop_button",
+      "emergency_stop_button",
+      "left_stick_pad",
+      "right_stick_pad",
+    ).forEach { tag ->
+      composeRule.onNodeWithTag(tag).assertIsDisplayed()
+    }
+
+    composeRule.onNodeWithTag("arm_button").assertWidthIsAtLeast(64.dp).assertHeightIsAtLeast(44.dp)
+    composeRule.onNodeWithTag("left_stick_pad").assertWidthIsAtLeast(minStickDp.dp).assertHeightIsAtLeast(minStickDp.dp)
+    composeRule.onNodeWithTag("right_stick_pad").assertWidthIsAtLeast(minStickDp.dp).assertHeightIsAtLeast(minStickDp.dp)
+
+    val rootBounds = composeRule.onRoot().getBoundsInRoot()
+    val totalArea = rootBounds.width.value * rootBounds.height.value
+    val hudTags =
+      listOf(
+        "hud_top_left",
+        "hud_top_right",
+        "hud_modifiers_row",
+        "hud_actions_row",
+        "left_stick_pad",
+        "right_stick_pad",
+      )
+    val hudArea =
+      hudTags.sumOf { tag ->
+        val b = composeRule.onNodeWithTag(tag).getBoundsInRoot()
+        (b.width.value * b.height.value).toDouble()
+      }
+    val hudFraction = hudArea / totalArea
+    assertTrue(
+      "HUD overlay fraction $hudFraction exceeded 0.30 (cleared video must be >= 70%)",
+      hudFraction <= 0.30,
+    )
   }
 }

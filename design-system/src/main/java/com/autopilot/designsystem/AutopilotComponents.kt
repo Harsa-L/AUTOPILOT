@@ -52,10 +52,16 @@ fun AutopilotButton(
   icon: ImageVector? = null,
   tone: AutopilotButtonTone = AutopilotButtonTone.PRIMARY,
   tag: String? = null,
+  compact: Boolean = false,
 ) {
   val theme = LocalResolvedTheme.current
   val taggedModifier = if (tag != null) modifier.testTag(tag) else modifier
   val shape = RoundedCornerShape(theme.components.buttonRadius)
+  val horizontalPad = if (compact) 10.dp else 16.dp
+  val verticalPad = if (compact) 8.dp else 10.dp
+  val textStyle = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.titleMedium
+  val iconSize = if (compact) 16.dp else theme.components.iconSizeSm
+  val iconGap = if (compact) 5.dp else 8.dp
 
   if (tone == AutopilotButtonTone.SECONDARY) {
     OutlinedButton(
@@ -63,16 +69,16 @@ fun AutopilotButton(
       enabled = enabled,
       shape = shape,
       border = BorderStroke(theme.primitives.borderHairline, theme.colors.borderSubtle),
-      contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+      contentPadding = PaddingValues(horizontal = horizontalPad, vertical = verticalPad),
       modifier = taggedModifier.defaultMinSize(minHeight = theme.components.buttonHeight),
     ) {
       if (icon != null) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(theme.components.iconSizeSm))
-        Spacer(Modifier.width(8.dp))
+        Icon(icon, contentDescription = null, modifier = Modifier.size(iconSize))
+        Spacer(Modifier.width(iconGap))
       }
       Text(
         text = text,
-        style = MaterialTheme.typography.titleMedium,
+        style = textStyle,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
       )
@@ -103,16 +109,16 @@ fun AutopilotButton(
           disabledContainerColor = theme.colors.surfaceElevated,
           disabledContentColor = theme.colors.textSecondary,
         ),
-      contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+      contentPadding = PaddingValues(horizontal = horizontalPad, vertical = verticalPad),
       modifier = taggedModifier.defaultMinSize(minHeight = theme.components.buttonHeight),
     ) {
       if (icon != null) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(theme.components.iconSizeSm))
-        Spacer(Modifier.width(8.dp))
+        Icon(icon, contentDescription = null, modifier = Modifier.size(iconSize))
+        Spacer(Modifier.width(iconGap))
       }
       Text(
         text = text,
-        style = MaterialTheme.typography.titleMedium,
+        style = textStyle,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
       )
