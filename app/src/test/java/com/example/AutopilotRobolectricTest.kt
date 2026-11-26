@@ -5,11 +5,15 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertWidthIsAtLeast
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.width
@@ -53,10 +57,23 @@ class AutopilotRobolectricTest {
     composeRule.onNodeWithTag("settings_sub_back").performClick()
     composeRule.waitForIdle()
 
-    // Navigate to Aircraft & Link sub-page and back
+    // Navigate to Flight Controls & Gamepad sub-page
+    composeRule.onNodeWithTag("settings_row_controls").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("gamepad_enable_switch").performScrollTo().assertIsDisplayed()
+    composeRule.onNodeWithTag("settings_sub_back").performClick()
+    composeRule.waitForIdle()
+
+    // Navigate to Aircraft & Link sub-page, pick X69 LG, and verify RTSP_H265 video mode selector
     composeRule.onNodeWithTag("settings_row_aircraft").performClick()
     composeRule.waitForIdle()
     composeRule.onNodeWithText("Aircraft & Link").assertIsDisplayed()
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("protocol_card_x69_lg"))
+    composeRule.onNodeWithTag("protocol_card_x69_lg").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNode(hasScrollAction()).performScrollToIndex(0)
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("video_mode_rtsp_h265").performScrollTo().assertIsDisplayed()
     composeRule.onNodeWithTag("settings_sub_back").performClick()
     composeRule.waitForIdle()
     composeRule.onNodeWithTag("settings_back_button").performClick()
@@ -88,11 +105,14 @@ class AutopilotRobolectricTest {
     listOf(
       "aircraft_selector_pill",
       "connect_toggle_button",
+      "snapshot_button",
+      "record_video_button",
       "target_select_toggle",
       "open_vision_button",
       "open_settings_button",
       "speed_tier_cycle",
       "headless_mode_chip",
+      "flip_360_chip",
       "calibrate_gyro_chip",
       "trim_button",
       "arm_button",

@@ -16,6 +16,7 @@ enum class TransportKind : int32_t {
   RAW_UDP_H264 = 4,
   RAW_UDP_H265 = 5,
   SYNTHETIC_TEST_PATTERN = 6,
+  RTSP_H265 = 7,
 };
 
 struct ReassembledFrame {
@@ -31,6 +32,7 @@ struct ReassembledFrame {
 
 /**
  * Bounded, reusable-buffer video packet reassembler supporting JPEG, RTP/JPEG,
+ * RFC 6184 H.264 RTP (Single/STAP-A/FU-A), RFC 7798 H.265 RTP (Single/AP/FU),
  * and Annex-B H.264/H.265 UDP payloads with drop-oldest backpressure.
  */
 class VideoReassembler {
@@ -42,6 +44,8 @@ class VideoReassembler {
 
   void reset();
   void push_udp_packet(const uint8_t* data, size_t len, int64_t timestamp_us);
+  void push_rtp_packet(const uint8_t* data, size_t len, int64_t timestamp_us, bool is_hevc);
+  void push_annex_b_csd(const uint8_t* data, size_t len, int64_t timestamp_us, bool is_hevc);
 
   /**
    * Generates an explicitly tagged synthetic test-pattern RGB24 frame.
@@ -57,10 +61,16 @@ class VideoReassembler {
  private:
   void commit_frame(const uint8_t* data, size_t len, int64_t timestamp_us, int32_t width,
                     int32_t height, bool is_keyframe, bool is_synthetic);
+  void commit_annex_b_unit(bool is_hevc, bool is_keyframe, int64_t timestamp_us);
+  void cache_csd_nal(const uint8_t* nal, size_t len, bool is_hevc);
+  void append_start_code(std::vector<uint8_t>& dst);
 
   TransportKind transport_;
   std::vector<uint8_t> staging_;
+  std::vector<uint8_t> rtp_fu_staging_;
+  std::vector<uint8_t> csd_annex_b_;
   bool in_frame_ = false;
+  bool rtp_fu_active_ = false;
   uint64_t next_sequence_ = 1;
   std::atomic<uint64_t> dropped_frames_{0};
   std::atomic<uint64_t> assembled_frames_{0};

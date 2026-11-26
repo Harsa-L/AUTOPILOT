@@ -98,4 +98,61 @@ class ProtocolPacketEncoderTest {
     assertEquals(0x99.toByte(), x69[9])
     assertFalse(x69.contentEquals(wifiCam))
   }
+
+  @Test
+  fun `flip360, unlock motors, and fast fly encode exact protocol bits`() {
+    val flipPkt =
+      ProtocolPacketEncoder.encodeControlPacket(
+        ProtocolFamily.WIFI_UAV,
+        actionFlags = NativeActionFlags.FLIP_360,
+      )
+    assertEquals(0x40.toByte(), flipPkt[5])
+    assertEquals(ByteFraming.xorChecksum(flipPkt, 1, 6), flipPkt[6])
+
+    val unlockPkt =
+      ProtocolPacketEncoder.encodeControlPacket(
+        ProtocolFamily.S2X,
+        actionFlags = NativeActionFlags.UNLOCK_MOTORS,
+      )
+    assertEquals(0x80.toByte(), unlockPkt[6])
+    assertEquals(ByteFraming.xorChecksum(unlockPkt, 2, 9), unlockPkt[9])
+
+    val fastS2x =
+      ProtocolPacketEncoder.encodeControlPacket(
+        ProtocolFamily.S2X,
+        speedTier = 0,
+        actionFlags = NativeActionFlags.FAST_FLY,
+      )
+    assertEquals(2.toByte(), fastS2x[7])
+    assertEquals(0x01.toByte(), fastS2x[8])
+    assertEquals(ByteFraming.xorChecksum(fastS2x, 2, 9), fastS2x[9])
+  }
+
+  @Test
+  fun `registry exposes TurboDrone models, alternate host IPs, and selectable video modes`() {
+    val s2x = ProtocolCompatibilityRegistry.findById("s2x")!!
+    assertTrue(s2x.descriptor.knownModels.contains("PL-515"))
+
+    val wifiUav = ProtocolCompatibilityRegistry.findById("wifi_uav")!!
+    assertTrue(wifiUav.descriptor.knownModels.containsAll(listOf("V88", "V66", "GT3")))
+    assertTrue(
+      wifiUav.capabilities.supportedVideoModes.containsAll(
+        listOf(
+          com.autopilot.drone.protocolapi.VideoTransportType.RAW_UDP_JPEG,
+          com.autopilot.drone.protocolapi.VideoTransportType.RAW_UDP_H264,
+        )
+      )
+    )
+
+    val x69 = ProtocolCompatibilityRegistry.findById("x69_lg")!!
+    assertTrue(x69.descriptor.alternateHostIps.contains("172.16.11.1"))
+    assertTrue(
+      x69.capabilities.supportedVideoModes.contains(
+        com.autopilot.drone.protocolapi.VideoTransportType.RTSP_H265
+      )
+    )
+    assertTrue(x69.capabilities.supportsFlip)
+    assertTrue(x69.capabilities.supportsUnlockCommand)
+    assertTrue(x69.capabilities.supportsFastFly)
+  }
 }

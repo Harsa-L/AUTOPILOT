@@ -1,5 +1,6 @@
 package com.autopilot.video
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaCodecList
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 
 data class VideoMetrics(
   val fps: Float = 0f,
@@ -47,9 +49,16 @@ sealed interface VideoStreamState {
   data class Error(val message: String) : VideoStreamState
 }
 
+data class VideoCaptureState(
+  val isRecording: Boolean = false,
+  val recordingDurationSec: Long = 0L,
+  val recordedFrames: Long = 0L,
+  val lastNotice: String? = null,
+)
+
 /**
- * Independent low-latency video decoding and presentation controller.
- * Keeps transport, decoding, and frame-drop metrics decoupled from UI and vision.
+ * Independent low-latency video decoding, snapshot, and MP4 recording controller.
+ * Keeps transport, hardware MediaCodec decoding, and capture decoupled from UI and vision.
  */
 class VideoPipelineController(
   private val scope: CoroutineScope,
@@ -58,7 +67,13 @@ class VideoPipelineController(
   private val _streamState = MutableStateFlow<VideoStreamState>(VideoStreamState.Idle)
   val streamState: StateFlow<VideoStreamState> = _streamState.asStateFlow()
 
+  private val _captureState = MutableStateFlow(VideoCaptureState())
+  val captureState: StateFlow<VideoCaptureState> = _captureState.asStateFlow()
+
   private var streamJob: Job? = null
+  private var annexBDecoder: AnnexBVideoDecoder? = null
+  private var activeRecorder: Mp4FrameRecorder? = null
+  private var recorderContext: Context? = null
   private var reusablePixels = IntArray(0)
   private var lastFpsWindowStartMs = 0L
   private var framesInWindow = 0
@@ -70,7 +85,8 @@ class VideoPipelineController(
       when (transport) {
         VideoTransportType.RTSP_H264,
         VideoTransportType.RAW_UDP_H264 -> MediaFormat.MIMETYPE_VIDEO_AVC
-        VideoTransportType.RAW_UDP_H265 -> MediaFormat.MIMETYPE_VIDEO_HEVC
+        VideoTransportType.RAW_UDP_H265,
+        VideoTransportType.RTSP_H265 -> MediaFormat.MIMETYPE_VIDEO_HEVC
         VideoTransportType.RAW_UDP_JPEG,
         VideoTransportType.RTP_JPEG -> "image/jpeg (Skia/libjpeg-turbo)"
         VideoTransportType.SYNTHETIC_TEST_PATTERN -> "Synthetic RGB24 Calibration Pattern"
@@ -88,22 +104,36 @@ class VideoPipelineController(
     return codec ?: "No matching MediaCodec for $mime"
   }
 
-  fun attachToProtocol(protocol: DroneProtocol, onFrameDecoded: ((Bitmap, Boolean) -> Unit)? = null) {
+  fun attachToProtocol(
+    protocol: DroneProtocol,
+    transportOverride: VideoTransportType? = null,
+    onFrameDecoded: ((Bitmap, Boolean) -> Unit)? = null,
+  ) {
     detach()
-    val transport = protocol.descriptor.videoTransport
+    val transport = transportOverride ?: protocol.descriptor.videoTransport
     val codecInfo = queryHardwareDecoderSupport(transport)
     totalDecoded = 0L
     framesInWindow = 0
     currentFps = 0f
     lastFpsWindowStartMs = System.currentTimeMillis()
 
+    annexBDecoder =
+      when (transport) {
+        VideoTransportType.RTSP_H264,
+        VideoTransportType.RAW_UDP_H264 -> AnnexBVideoDecoder(isHevc = false)
+        VideoTransportType.RAW_UDP_H265,
+        VideoTransportType.RTSP_H265 -> AnnexBVideoDecoder(isHevc = true)
+        else -> null
+      }
+
     _streamState.value =
       VideoStreamState.WaitingForKeyframe(
         transport = transport,
         detail =
           when (transport) {
-            VideoTransportType.RTSP_H264 ->
-              "Waiting for RTSP stream (${protocol.descriptor.rtspPath ?: "port ${protocol.descriptor.videoPort}"}) — $codecInfo"
+            VideoTransportType.RTSP_H264,
+            VideoTransportType.RTSP_H265 ->
+              "Negotiating RTSP stream (${protocol.descriptor.rtspPath ?: "port ${protocol.descriptor.videoPort}"}) — $codecInfo"
             VideoTransportType.SYNTHETIC_TEST_PATTERN ->
               "Initializing Isolated Loopback Test Pattern…"
             VideoTransportType.NONE -> "Protocol does not expose a video stream."
@@ -144,18 +174,112 @@ class VideoPipelineController(
                 metrics = metrics,
                 isSyntheticHarness = packet.isSyntheticHarness,
               )
+            activeRecorder?.let { rec ->
+              if (rec.isRecording) {
+                rec.appendFrame(bitmap)
+                _captureState.value =
+                  _captureState.value.copy(
+                    isRecording = true,
+                    recordingDurationSec = rec.durationSec(now),
+                    recordedFrames = rec.framesWritten,
+                  )
+              }
+            }
             onFrameDecoded?.invoke(bitmap, packet.isSyntheticHarness)
           }
         }
         .flowOn(dispatchers.default)
         .launchIn(scope)
 
-    AutopilotLog.info(SubsystemTag.VIDEO, "VideoPipeline attached to ${protocol.descriptor.id} ($codecInfo)")
+    AutopilotLog.info(SubsystemTag.VIDEO, "VideoPipeline attached to ${protocol.descriptor.id} ($transport · $codecInfo)")
+  }
+
+  fun captureSnapshot(context: Context) {
+    val active = _streamState.value as? VideoStreamState.ActiveFrame
+    if (active == null) {
+      _captureState.value = _captureState.value.copy(lastNotice = "Wait for active video frame before snapshot")
+      return
+    }
+    val appCtx = context.applicationContext
+    val frameCopy = active.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+    scope.launch(dispatchers.io) {
+      val res = ScopedMediaCapture.saveSnapshotJpeg(appCtx, frameCopy)
+      res.onSuccess { name ->
+        _captureState.value = _captureState.value.copy(lastNotice = "Snapshot saved: $name")
+      }.onFailure { err ->
+        _captureState.value = _captureState.value.copy(lastNotice = "Snapshot failed: ${err.message}")
+      }
+    }
+  }
+
+  fun toggleRecording(context: Context) {
+    val current = activeRecorder
+    if (current != null && current.isRecording) {
+      stopRecording()
+      return
+    }
+    val active = _streamState.value as? VideoStreamState.ActiveFrame
+    if (active == null) {
+      _captureState.value = _captureState.value.copy(lastNotice = "Start video stream before recording")
+      return
+    }
+    val appCtx = context.applicationContext
+    recorderContext = appCtx
+    val recorder = Mp4FrameRecorder()
+    scope.launch(dispatchers.io) {
+      val started = recorder.start(appCtx, active.bitmap.width, active.bitmap.height)
+      if (started) {
+        activeRecorder = recorder
+        _captureState.value =
+          VideoCaptureState(
+            isRecording = true,
+            recordingDurationSec = 0L,
+            recordedFrames = 0L,
+            lastNotice = "Recording MP4 started",
+          )
+      } else {
+        _captureState.value =
+          _captureState.value.copy(isRecording = false, lastNotice = "Unable to start hardware MP4 recorder")
+      }
+    }
+  }
+
+  fun stopRecording() {
+    val recorder = activeRecorder ?: return
+    val ctx = recorderContext ?: return
+    activeRecorder = null
+    scope.launch(dispatchers.io) {
+      val summary = recorder.stop(ctx)
+      _captureState.value =
+        VideoCaptureState(
+          isRecording = false,
+          recordingDurationSec = 0L,
+          recordedFrames = 0L,
+          lastNotice = summary?.let { "Saved ${it.displayName} (${it.durationSec}s)" },
+        )
+    }
+  }
+
+  fun clearNotice() {
+    _captureState.value = _captureState.value.copy(lastNotice = null)
   }
 
   fun detach() {
+    if (activeRecorder?.isRecording == true) {
+      val rec = activeRecorder
+      val ctx = recorderContext
+      activeRecorder = null
+      if (rec != null && ctx != null) {
+        scope.launch(dispatchers.io) {
+          rec.stop(ctx)
+          _captureState.value = VideoCaptureState(isRecording = false)
+        }
+      }
+    }
     streamJob?.cancel()
     streamJob = null
+    annexBDecoder?.release()
+    annexBDecoder = null
     _streamState.value = VideoStreamState.Idle
   }
 
@@ -171,10 +295,9 @@ class VideoPipelineController(
       }
       VideoTransportType.RAW_UDP_H264,
       VideoTransportType.RAW_UDP_H265,
-      VideoTransportType.RTSP_H264 -> {
-        // Real Annex-B packets require valid SPS/PPS headers before MediaCodec Surface output;
-        // emit status update without fabricating video pixels.
-        null
+      VideoTransportType.RTSP_H264,
+      VideoTransportType.RTSP_H265 -> {
+        annexBDecoder?.decodeAccessUnit(packet.payload, packet.timestampUs)
       }
       VideoTransportType.NONE -> null
     }

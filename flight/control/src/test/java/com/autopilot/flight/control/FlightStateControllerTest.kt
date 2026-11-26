@@ -89,4 +89,38 @@ class FlightStateControllerTest {
 
     controller.disconnect()
   }
+
+  @Test
+  fun `arm sends unlockMotors, flip360 requires armed or flying, and fastFly latches speed tier 2`() = runTest {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    val controller = FlightStateController(scope)
+    val entry = ProtocolCompatibilityRegistry.findById("x69_lg")!!
+    val fake = FakeContractProtocol(entry.descriptor, entry.capabilities)
+
+    controller.connectProtocol(fake, ConnectionConfig("192.168.1.1", 1234, 1234, 7080))
+
+    // Flip rejected while still in Ready state
+    assertFalse(controller.flip360())
+
+    // Arm sends UnlockMotors on wire when capability is supported
+    assertTrue(controller.arm())
+    assertTrue(fake.recordedCommands.contains(FlightCommand.UnlockMotors))
+
+    // Flip succeeds once Armed
+    assertTrue(controller.flip360())
+    assertTrue(fake.recordedCommands.any { it is FlightCommand.Flip360 })
+
+    // Fast Fly latches enabled and locks speed tier to max (2)
+    controller.setFastFly(true)
+    assertTrue(controller.fastFly.value)
+    assertEquals(2, controller.speedTier.value)
+    assertTrue(fake.recordedCommands.contains(FlightCommand.SetFastFly(true)))
+    assertTrue(fake.recordedCommands.contains(FlightCommand.SetSpeedTier(2)))
+
+    controller.setFastFly(false)
+    assertFalse(controller.fastFly.value)
+    assertTrue(fake.recordedCommands.contains(FlightCommand.SetFastFly(false)))
+
+    controller.disconnect()
+  }
 }

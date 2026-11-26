@@ -48,7 +48,12 @@ class NativeDroneProtocolAdapter(
 
   private val nativeHandle = AtomicLong(0L)
   private var speedTier: Int = 1
-  private var cameraTilt: Int = 0
+  private var lastRoll: Float = 0f
+  private var lastPitch: Float = 0f
+  private var lastThrottle: Float = 0f
+  private var lastYaw: Float = 0f
+  private var lastTrimRoll: Float = 0f
+  private var lastTrimPitch: Float = 0f
   private var activeConfig: ConnectionConfig? = null
 
   override suspend fun connect(config: ConnectionConfig) =
@@ -69,14 +74,18 @@ class NativeDroneProtocolAdapter(
         return@withContext
       }
 
+      val selectedTransport = config.videoTransportOverride ?: descriptor.videoTransport
+      val resolvedRtspPath = config.rtspPath ?: descriptor.rtspPath ?: ""
+
       val handle =
         AutopilotNativeBridge.nativeCreateSession(
           familyWireId = descriptor.family.wireId,
-          transportKind = descriptor.videoTransport.toNativeKind(),
+          transportKind = selectedTransport.toNativeKind(),
           hostIp = config.hostIp,
           controlPort = config.controlPort,
           videoPort = config.videoPort,
           heartbeatPort = config.heartbeatPort ?: 0,
+          rtspPath = resolvedRtspPath,
           controlRateHz = descriptor.controlRateHz,
           networkHandle = config.networkHandle ?: 0L,
           allowSyntheticHarness = config.allowSyntheticHarness,
@@ -91,7 +100,7 @@ class NativeDroneProtocolAdapter(
       if (!started) {
         AutopilotNativeBridge.nativeDestroySession(handle)
         _connectionState.value =
-          ConnectionState.Error("Failed to open UDP sockets for ${descriptor.displayName}.")
+          ConnectionState.Error("Failed to open network sockets for ${descriptor.displayName}.")
         return@withContext
       }
 
@@ -101,7 +110,7 @@ class NativeDroneProtocolAdapter(
       AutopilotLog.info(
         SubsystemTag.PROTOCOL,
         "Started ${descriptor.id} native session -> ${config.hostIp}:${config.controlPort} " +
-          "(synthetic=${descriptor.isSyntheticHarness})",
+          "(video=$selectedTransport, synthetic=${descriptor.isSyntheticHarness})",
       )
     }
 
@@ -122,6 +131,12 @@ class NativeDroneProtocolAdapter(
 
     when (command) {
       is FlightCommand.StickAxes -> {
+        lastRoll = command.roll
+        lastPitch = command.pitch
+        lastThrottle = command.throttle
+        lastYaw = command.yaw
+        lastTrimRoll = command.trimRoll
+        lastTrimPitch = command.trimPitch
         AutopilotNativeBridge.nativeUpdateSticks(
           handle = handle,
           roll = command.roll,
@@ -131,7 +146,7 @@ class NativeDroneProtocolAdapter(
           trimRoll = command.trimRoll,
           trimPitch = command.trimPitch,
           speedTier = speedTier,
-          cameraTilt = cameraTilt,
+          cameraTilt = 0,
         )
       }
       FlightCommand.Takeoff -> {
@@ -162,20 +177,65 @@ class NativeDroneProtocolAdapter(
       is FlightCommand.SetSpeedTier -> {
         if (capabilities.supportsSpeedTiers) {
           speedTier = command.tier.coerceIn(0, 2)
+          AutopilotNativeBridge.nativeUpdateSticks(
+            handle = handle,
+            roll = lastRoll,
+            pitch = lastPitch,
+            throttle = lastThrottle,
+            yaw = lastYaw,
+            trimRoll = lastTrimRoll,
+            trimPitch = lastTrimPitch,
+            speedTier = speedTier,
+            cameraTilt = 0,
+          )
         }
       }
       is FlightCommand.SetHeadlessMode -> {
-        if (capabilities.supportsHeadlessMode && command.enabled) {
-          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.HEADLESS)
+        if (capabilities.supportsHeadlessMode) {
+          AutopilotNativeBridge.nativeSetLatchedAction(
+            handle,
+            NativeActionFlags.HEADLESS,
+            command.enabled,
+          )
         }
       }
       is FlightCommand.CameraTilt -> {
-        if (capabilities.supportsCameraTilt) {
-          cameraTilt = command.delta.coerceIn(-1, 1)
+        if (capabilities.supportsCameraTilt && command.delta != 0) {
+          AutopilotNativeBridge.nativeUpdateSticks(
+            handle = handle,
+            roll = lastRoll,
+            pitch = lastPitch,
+            throttle = lastThrottle,
+            yaw = lastYaw,
+            trimRoll = lastTrimRoll,
+            trimPitch = lastTrimPitch,
+            speedTier = speedTier,
+            cameraTilt = command.delta.coerceIn(-1, 1),
+          )
+        }
+      }
+      is FlightCommand.Flip360 -> {
+        if (capabilities.supportsFlip) {
+          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.FLIP_360)
+        }
+      }
+      FlightCommand.UnlockMotors -> {
+        if (capabilities.supportsUnlockCommand) {
+          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.UNLOCK_MOTORS)
+        }
+      }
+      is FlightCommand.SetFastFly -> {
+        if (capabilities.supportsFastFly) {
+          if (command.enabled) speedTier = 2
+          AutopilotNativeBridge.nativeSetLatchedAction(
+            handle,
+            NativeActionFlags.FAST_FLY,
+            command.enabled,
+          )
         }
       }
       FlightCommand.RequestKeyframe -> {
-        // Handled by decoder/transport re-sync when supported.
+        AutopilotNativeBridge.nativeRequestKeyframe(handle)
       }
     }
   }
@@ -194,8 +254,7 @@ class NativeDroneProtocolAdapter(
               } else {
                 0f
               }
-            // Hardware-truth rule: batteryPercent, rssiDbm, altitudeMeters are null when hardware
-            // does not report them.
+            // Hardware-truth rule: fields remain null unless physically verified from RX telemetry.
             emit(
               DroneTelemetry(
                 timestampMs = System.currentTimeMillis(),
@@ -204,11 +263,12 @@ class NativeDroneProtocolAdapter(
                 packetsReceived = counters.packetsReceived,
                 droppedPackets = counters.droppedPackets,
                 linkRttMs = null,
-                batteryPercent = null,
+                batteryPercent = counters.batteryPercent,
                 rssiDbm = null,
                 altitudeMeters = null,
                 lastCommandHex = hex,
                 isSyntheticHarness = counters.isSynthetic,
+                firmwareStatusFlags = counters.firmwareStatusFlags,
               )
             )
             if (!counters.running && _connectionState.value is ConnectionState.Connected) {
@@ -226,7 +286,7 @@ class NativeDroneProtocolAdapter(
   override fun videoFrames(): Flow<VideoFramePacket> =
     flow {
         val directBuffer = ByteBuffer.allocateDirect(512 * 1024)
-        val metaOut = LongArray(7)
+        val metaOut = LongArray(8)
         while (currentCoroutineContext().isActive) {
           val handle = nativeHandle.get()
           if (handle != 0L && AutopilotNativeBridge.isNativeLoaded) {
@@ -245,13 +305,13 @@ class NativeDroneProtocolAdapter(
                   width = meta.width,
                   height = meta.height,
                   payload = copy,
-                  isKeyFrame = true,
+                  isKeyFrame = meta.isKeyFrame,
                   isSyntheticHarness = meta.isSynthetic,
                 )
               )
             }
           }
-          delay(16L)
+          delay(12L)
         }
       }
       .flowOn(dispatchers.io)
@@ -291,6 +351,8 @@ object ProtocolPacketEncoder {
     val t = axisToByte(throttle)
     val y = axisToByte(yaw)
     val f = mapFlags(actionFlags)
+    val effectiveSpeed =
+      if ((actionFlags and NativeActionFlags.FAST_FLY) != 0) 2 else (speedTier and 0x03)
 
     return when (family) {
       ProtocolFamily.S2X ->
@@ -302,8 +364,8 @@ object ProtocolPacketEncoder {
             t,
             y,
             f,
-            (speedTier and 0x03).toByte(),
-            0x00,
+            effectiveSpeed.toByte(),
+            if ((actionFlags and NativeActionFlags.FAST_FLY) != 0) 0x01 else 0x00,
             0x00,
             0x99.toByte(),
           )
@@ -347,7 +409,7 @@ object ProtocolPacketEncoder {
             t,
             y,
             f,
-            (speedTier and 0x03).toByte(),
+            effectiveSpeed.toByte(),
             cameraTilt.toByte(),
             0x00,
             0x99.toByte(),
@@ -363,7 +425,7 @@ object ProtocolPacketEncoder {
             t,
             y,
             f,
-            (speedTier and 0x03).toByte(),
+            effectiveSpeed.toByte(),
             0x00,
             0x5A,
           )
@@ -384,6 +446,8 @@ object ProtocolPacketEncoder {
     if ((actionFlags and NativeActionFlags.CALIBRATE_GYRO) != 0) out = out or 0x08
     if ((actionFlags and NativeActionFlags.HEADLESS) != 0) out = out or 0x10
     if ((actionFlags and NativeActionFlags.MOTOR_STOP) != 0) out = out or 0x20
+    if ((actionFlags and NativeActionFlags.FLIP_360) != 0) out = out or 0x40
+    if ((actionFlags and NativeActionFlags.UNLOCK_MOTORS) != 0) out = out or 0x80
     return out.toByte()
   }
 }
@@ -397,6 +461,7 @@ private fun VideoTransportType.toNativeKind(): Int =
     VideoTransportType.RAW_UDP_H264 -> 4
     VideoTransportType.RAW_UDP_H265 -> 5
     VideoTransportType.SYNTHETIC_TEST_PATTERN -> 6
+    VideoTransportType.RTSP_H265 -> 7
   }
 
 private fun Int.toVideoTransportType(): VideoTransportType =
@@ -407,5 +472,6 @@ private fun Int.toVideoTransportType(): VideoTransportType =
     4 -> VideoTransportType.RAW_UDP_H264
     5 -> VideoTransportType.RAW_UDP_H265
     6 -> VideoTransportType.SYNTHETIC_TEST_PATTERN
+    7 -> VideoTransportType.RTSP_H265
     else -> VideoTransportType.NONE
   }

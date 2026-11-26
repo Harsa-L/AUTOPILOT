@@ -23,8 +23,8 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeCreateSession(
     JNIEnv* env, jobject /* thiz */, jint family_wire_id, jint transport_kind, jstring host_ip,
-    jint control_port, jint video_port, jint heartbeat_port, jint control_rate_hz,
-    jlong network_handle, jboolean allow_synthetic_harness) {
+    jint control_port, jint video_port, jint heartbeat_port, jstring rtsp_path,
+    jint control_rate_hz, jlong network_handle, jboolean allow_synthetic_harness) {
   autopilot::comm::SessionConfig cfg;
   cfg.family = static_cast<autopilot::protocol::Family>(family_wire_id);
   cfg.video_transport = static_cast<autopilot::video::TransportKind>(transport_kind);
@@ -32,6 +32,7 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeCreateSession(
   cfg.control_port = control_port;
   cfg.video_port = video_port;
   cfg.heartbeat_port = heartbeat_port;
+  cfg.rtsp_path = jstring_to_std(env, rtsp_path);
   cfg.control_rate_hz = control_rate_hz;
   cfg.network_handle = network_handle;
   cfg.allow_synthetic_harness = (allow_synthetic_harness == JNI_TRUE);
@@ -87,6 +88,25 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeTriggerAction(JNIEnv* 
 }
 
 JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeSetLatchedAction(JNIEnv* /* env */,
+                                                                           jobject /* thiz */,
+                                                                           jlong handle,
+                                                                           jint action_flag,
+                                                                           jboolean enabled) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (!session) return;
+  session->set_latched_action(static_cast<uint32_t>(action_flag), enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeRequestKeyframe(JNIEnv* /* env */,
+                                                                          jobject /* thiz */,
+                                                                          jlong handle) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (session) session->request_keyframe();
+}
+
+JNIEXPORT void JNICALL
 Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeClearActions(JNIEnv* /* env */,
                                                                        jobject /* thiz */,
                                                                        jlong handle) {
@@ -100,8 +120,8 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeReadSessionCounters(JN
                                                                              jobject /* thiz */,
                                                                              jlong handle) {
   auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
-  jlongArray out = env->NewLongArray(7);
-  jlong vals[7] = {0, 0, 0, 0, 0, 0, 0};
+  jlongArray out = env->NewLongArray(9);
+  jlong vals[9] = {0, 0, 0, 0, 0, 0, 0, -1, -1};
   if (session) {
     const auto snap = session->snapshot();
     vals[0] = snap.running ? 1 : 0;
@@ -111,8 +131,10 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeReadSessionCounters(JN
     vals[4] = static_cast<jlong>(snap.packets_received);
     vals[5] = static_cast<jlong>(snap.dropped_packets);
     vals[6] = static_cast<jlong>(snap.last_rx_timestamp_ms);
+    vals[7] = static_cast<jlong>(snap.battery_percent);
+    vals[8] = static_cast<jlong>(snap.firmware_status_flags);
   }
-  env->SetLongArrayRegion(out, 0, 7, vals);
+  env->SetLongArrayRegion(out, 0, 9, vals);
   return out;
 }
 
@@ -128,7 +150,7 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeLastCommandHex(JNIEnv*
 
 /**
  * Copies the latest reassembled frame into a reusable direct ByteBuffer.
- * Writes metadata into [outMeta] = [sequence, timestampUs, transportKind, width, height, byteLen, isSynthetic].
+ * Writes metadata into [outMeta] = [sequence, timestampUs, transportKind, width, height, byteLen, isSynthetic, isKeyframe].
  */
 JNIEXPORT jboolean JNICALL
 Java_com_autopilot_nativecore_AutopilotNativeBridge_nativePopVideoFrame(
@@ -145,7 +167,7 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativePopVideoFrame(
   if (static_cast<jlong>(frame.payload.size()) > capacity) return JNI_FALSE;
 
   std::memcpy(dst, frame.payload.data(), frame.payload.size());
-  jlong meta[7] = {
+  jlong meta[8] = {
       static_cast<jlong>(frame.sequence),
       static_cast<jlong>(frame.timestamp_us),
       static_cast<jlong>(frame.transport),
@@ -153,8 +175,9 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativePopVideoFrame(
       static_cast<jlong>(frame.height),
       static_cast<jlong>(frame.payload.size()),
       frame.is_synthetic ? 1L : 0L,
+      frame.is_keyframe ? 1L : 0L,
   };
-  env->SetLongArrayRegion(out_meta, 0, 7, meta);
+  env->SetLongArrayRegion(out_meta, 0, 8, meta);
   return JNI_TRUE;
 }
 
@@ -203,14 +226,6 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeDestroyVisionEngine(JN
   delete engine;
 }
 
-/**
- * Computes C++20 optical flow and updates tracks in one coarse-grained JNI call.
- * detectionsPacked: stride 6 floats per detection [classId, conf, left, top, right, bottom].
- * Returns flat float array:
- *   [0] = globalDxNorm, [1] = globalDyNorm, [2] = flowCount, [3] = trackCount,
- *   followed by flowCount * 5 floats [normX, normY, dxNorm, dyNorm, conf],
- *   followed by trackCount * 11 floats [trackId, classId, conf, l, t, r, b, vx, vy, distM, uncM].
- */
 JNIEXPORT jfloatArray JNICALL
 Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeProcessVisionFrame(
     JNIEnv* env, jobject /* thiz */, jlong handle, jobject rgb24_direct_buffer, jint width,

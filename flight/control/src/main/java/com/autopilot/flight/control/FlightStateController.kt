@@ -128,6 +128,9 @@ class FlightStateController(private val scope: CoroutineScope) {
   private val _speedTier = MutableStateFlow(1)
   val speedTier: StateFlow<Int> = _speedTier.asStateFlow()
 
+  private val _fastFly = MutableStateFlow(false)
+  val fastFly: StateFlow<Boolean> = _fastFly.asStateFlow()
+
   private val _headlessMode = MutableStateFlow(false)
   val headlessMode: StateFlow<Boolean> = _headlessMode.asStateFlow()
 
@@ -216,6 +219,7 @@ class FlightStateController(private val scope: CoroutineScope) {
     activeProtocol = null
     _telemetry.value = null
     _headlessMode.value = false
+    _fastFly.value = false
     _cameraTiltStep.value = 0
     _flightState.value = FlightState.Disconnected
   }
@@ -227,8 +231,29 @@ class FlightStateController(private val scope: CoroutineScope) {
       return false
     }
     _flightState.value = FlightState.Armed
-    _safetyNotice.value = "Motors armed. Verify clear airspace before takeoff."
+    val proto = activeProtocol
+    if (proto != null && proto.capabilities.supportsUnlockCommand) {
+      scope.launch { proto.sendCommand(FlightCommand.UnlockMotors) }
+      _safetyNotice.value = "Motors unlocked & armed. Verify clear airspace."
+    } else {
+      _safetyNotice.value = "Motors armed. Verify clear airspace before takeoff."
+    }
     AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "FlightState -> ARMED")
+    return true
+  }
+
+  suspend fun unlockMotors(): Boolean {
+    val proto = activeProtocol ?: return false
+    if (!proto.capabilities.supportsUnlockCommand) {
+      _safetyNotice.value = "${proto.descriptor.displayName} does not support motor unlock command."
+      return false
+    }
+    proto.sendCommand(FlightCommand.UnlockMotors)
+    if (_flightState.value == FlightState.Ready || _flightState.value == FlightState.Connected) {
+      _flightState.value = FlightState.Armed
+    }
+    _safetyNotice.value = "Protocol motor unlock pulse transmitted."
+    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "UnlockMotors transmitted on ${proto.descriptor.id}")
     return true
   }
 
@@ -271,6 +296,23 @@ class FlightStateController(private val scope: CoroutineScope) {
     if (_flightState.value == FlightState.TakingOff) {
       _flightState.value = FlightState.Flying
     }
+    return true
+  }
+
+  suspend fun flip360(direction: Int = 0): Boolean {
+    val proto = activeProtocol ?: return false
+    if (!proto.capabilities.supportsFlip) {
+      _safetyNotice.value = "${proto.descriptor.displayName} does not support 360° flip stunts."
+      return false
+    }
+    val state = _flightState.value
+    if (state != FlightState.Armed && state != FlightState.Flying) {
+      _safetyNotice.value = "Arm or fly aircraft before commanding 360° flip."
+      return false
+    }
+    proto.sendCommand(FlightCommand.Flip360(direction))
+    _safetyNotice.value = "360° flip trigger transmitted."
+    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded FLIP_360 on ${proto.descriptor.id}")
     return true
   }
 
@@ -333,6 +375,24 @@ class FlightStateController(private val scope: CoroutineScope) {
     val proto = activeProtocol ?: return
     if (!proto.capabilities.supportsSpeedTiers) return
     proto.sendCommand(FlightCommand.SetSpeedTier(clamped))
+    if (proto.capabilities.supportsFastFly) {
+      val fast = clamped == 2
+      _fastFly.value = fast
+      proto.sendCommand(FlightCommand.SetFastFly(fast))
+    }
+  }
+
+  suspend fun setFastFly(enabled: Boolean) {
+    val proto = activeProtocol
+    if (proto != null && !proto.capabilities.supportsFastFly) return
+    _fastFly.value = enabled
+    if (enabled) {
+      _speedTier.value = 2
+    } else if (_speedTier.value == 2) {
+      _speedTier.value = 1
+    }
+    proto?.sendCommand(FlightCommand.SetFastFly(enabled))
+    proto?.sendCommand(FlightCommand.SetSpeedTier(_speedTier.value))
   }
 
   suspend fun setHeadlessMode(enabled: Boolean) {

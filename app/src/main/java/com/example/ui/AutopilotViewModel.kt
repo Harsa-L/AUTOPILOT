@@ -15,14 +15,15 @@ import com.autopilot.drone.protocolapi.ConnectionConfig
 import com.autopilot.drone.protocolapi.DroneCapabilities
 import com.autopilot.drone.protocolapi.DroneTelemetry
 import com.autopilot.drone.protocolapi.ProtocolCompatibilityRegistry
-import com.autopilot.drone.protocolapi.ProtocolDescriptor
 import com.autopilot.drone.protocolapi.ProtocolRegistryEntry
+import com.autopilot.drone.protocolapi.VideoTransportType
 import com.autopilot.drone.protocols.NativeDroneProtocolAdapter
 import com.autopilot.drone.protocols.WifiConnectivityController
 import com.autopilot.drone.protocols.WifiLinkSnapshot
 import com.autopilot.flight.control.ControlSensitivityConfig
 import com.autopilot.flight.control.FlightState
 import com.autopilot.flight.control.FlightStateController
+import com.autopilot.video.VideoCaptureState
 import com.autopilot.video.VideoPipelineController
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.DetectorAvailability
@@ -35,6 +36,9 @@ import com.example.data.AutopilotUserPrefs
 import com.example.data.DiagnosticTraceEntity
 import com.example.data.FlightSessionEntity
 import com.example.data.UserPreferencesStore
+import com.example.input.GamepadAction
+import com.example.input.GamepadAxes
+import com.example.input.GamepadStatus
 import com.example.service.FlightLinkForegroundService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -77,9 +81,11 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   val safetyNotice: StateFlow<String?> = flightController.safetyNotice
   val sensitivity: StateFlow<ControlSensitivityConfig> = flightController.sensitivity
   val speedTier: StateFlow<Int> = flightController.speedTier
+  val fastFly: StateFlow<Boolean> = flightController.fastFly
   val headlessMode: StateFlow<Boolean> = flightController.headlessMode
   val cameraTiltStep: StateFlow<Int> = flightController.cameraTiltStep
   val videoState: StateFlow<VideoStreamState> = videoPipeline.streamState
+  val captureState: StateFlow<VideoCaptureState> = videoPipeline.captureState
   val visionResult: StateFlow<VisionFrameResult?> = visionCoordinator.latestResult
   val detectorAvailability: StateFlow<DetectorAvailability> = visionCoordinator.availability
 
@@ -114,6 +120,12 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   private val _customHostIp = MutableStateFlow(_selectedEntry.value.descriptor.defaultHostIp)
   val customHostIp: StateFlow<String> = _customHostIp.asStateFlow()
 
+  private val _videoTransportOverride = MutableStateFlow<VideoTransportType?>(null)
+  val videoTransportOverride: StateFlow<VideoTransportType?> = _videoTransportOverride.asStateFlow()
+
+  private val _gamepadStatus = MutableStateFlow(GamepadStatus())
+  val gamepadStatus: StateFlow<GamepadStatus> = _gamepadStatus.asStateFlow()
+
   private val _visionOverlayEnabled = MutableStateFlow(false)
   val visionOverlayEnabled: StateFlow<Boolean> = _visionOverlayEnabled.asStateFlow()
 
@@ -144,6 +156,20 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     viewModelScope.launch {
       val prefs = prefsStore.preferences.first()
       selectProtocol(prefs.selectedProtocolId, persist = false)
+      val parsedTransport =
+        runCatching {
+            if (prefs.selectedVideoTransport == "AUTO") null
+            else VideoTransportType.valueOf(prefs.selectedVideoTransport)
+          }
+          .getOrNull()
+      if (parsedTransport != null &&
+        _selectedEntry.value.capabilities.supportedVideoModes.contains(parsedTransport)
+      ) {
+        _videoTransportOverride.value = parsedTransport
+      }
+      if (prefs.customHostIp.isNotBlank()) {
+        _customHostIp.value = prefs.customHostIp
+      }
       flightController.updateSensitivity(
         ControlSensitivityConfig(
           deadzone = prefs.stickDeadzone,
@@ -177,17 +203,50 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       ProtocolCompatibilityRegistry.findById(protocolId, includeSyntheticHarness = false) ?: return
     _selectedEntry.value = entry
     _customHostIp.value = entry.descriptor.defaultHostIp
+    _videoTransportOverride.value = null
     if (persist) {
-      viewModelScope.launch { prefsStore.updateSelectedProtocol(protocolId) }
+      viewModelScope.launch {
+        prefsStore.updateSelectedProtocol(protocolId)
+        prefsStore.updateStreamOverrides("AUTO", entry.descriptor.defaultHostIp)
+      }
     }
   }
 
   fun updateHostIp(ip: String) {
     _customHostIp.value = ip
+    viewModelScope.launch {
+      prefsStore.updateStreamOverrides(_videoTransportOverride.value?.name ?: "AUTO", ip)
+    }
+  }
+
+  fun selectVideoTransportOverride(transport: VideoTransportType?) {
+    val entry = _selectedEntry.value
+    val validated =
+      if (transport != null && entry.capabilities.supportedVideoModes.contains(transport)) transport
+      else null
+    _videoTransportOverride.value = validated
+    // Adjust default X69 host IP hint if RTSP CH00_1 is chosen on 172.16.11.1 if user kept default
+    if (entry.descriptor.id == "x69_lg" &&
+      validated == VideoTransportType.RTSP_H265 &&
+      _customHostIp.value == entry.descriptor.defaultHostIp &&
+      entry.descriptor.alternateHostIps.isNotEmpty()
+    ) {
+      _customHostIp.value = entry.descriptor.alternateHostIps.first()
+    }
+    viewModelScope.launch {
+      prefsStore.updateStreamOverrides(validated?.name ?: "AUTO", _customHostIp.value)
+    }
   }
 
   fun refreshWifi() {
     wifiController.refreshCurrentWifiState()
+  }
+
+  fun detectedProtocolFromWifi(): ProtocolRegistryEntry? {
+    val ssid = wifiLink.value.ssid ?: return null
+    return productionProtocols.firstOrNull { entry ->
+      entry.descriptor.ssidHints.any { hint -> ssid.startsWith(hint, ignoreCase = true) }
+    }
   }
 
   fun bindWifiApForSelectedProtocol() {
@@ -212,6 +271,17 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     val desc = entry.descriptor
     val host = _customHostIp.value.trim()
     val wifiHandle = wifiLink.value.boundNetworkHandle
+    val selectedVideo = _videoTransportOverride.value ?: desc.videoTransport
+
+    val resolvedRtsp =
+      when (selectedVideo) {
+        VideoTransportType.RTSP_H265 ->
+          if (desc.id == "x69_lg") "/live/ch00_1" else desc.rtspPath
+        VideoTransportType.RTSP_H264 ->
+          if (desc.id == "x69_lg") "rtsp://${host.ifEmpty { desc.defaultHostIp }}:7070/webcam"
+          else desc.rtspPath
+        else -> desc.rtspPath
+      }
 
     val adapter = NativeDroneProtocolAdapter(entry, dispatchers)
     val config =
@@ -220,10 +290,11 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         controlPort = desc.controlPort,
         videoPort = desc.videoPort,
         heartbeatPort = desc.heartbeatPort,
-        rtspPath = desc.rtspPath,
+        rtspPath = resolvedRtsp,
         ssid = wifiLink.value.ssid,
         networkHandle = wifiHandle,
         allowSyntheticHarness = false,
+        videoTransportOverride = selectedVideo,
       )
 
     viewModelScope.launch {
@@ -238,11 +309,11 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         protocolId = desc.id,
         subsystem = "PROTOCOL",
         severity = "INFO",
-        message = "Connecting ${desc.displayName} (${config.hostIp}:${desc.controlPort})",
+        message = "Connecting ${desc.displayName} (${config.hostIp}:${desc.controlPort}, video=$selectedVideo)",
       )
       FlightLinkForegroundService.start(getApplication(), desc.displayName)
       flightController.connectProtocol(adapter, config)
-      videoPipeline.attachToProtocol(adapter) { bitmap, isSynthetic ->
+      videoPipeline.attachToProtocol(adapter, transportOverride = selectedVideo) { bitmap, isSynthetic ->
         if (_visionOverlayEnabled.value || _targetSelectionEnabled.value) {
           visionCoordinator.submitFrame(bitmap, isSynthetic)
         }
@@ -299,6 +370,53 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     pushSticks()
   }
 
+  fun onGamepadAxesChanged(axes: GamepadAxes) {
+    if (axes.activeStickMotion && _activeTargetTask.value != null &&
+      _activeTargetTask.value?.action != TargetActionType.TRACK_TARGET
+    ) {
+      stopTargetAction()
+    }
+    leftStickX = axes.yaw
+    leftStickY = axes.throttle
+    rightStickX = axes.roll
+    rightStickY = axes.pitch
+    pushSticks()
+  }
+
+  fun onGamepadStatusChanged(status: GamepadStatus) {
+    _gamepadStatus.value = status
+  }
+
+  fun onGamepadAction(action: GamepadAction) {
+    when (action) {
+      GamepadAction.ARM_OR_TAKEOFF -> {
+        when (flightState.value) {
+          FlightState.Ready, FlightState.Connected -> armAircraft()
+          FlightState.Armed -> commandTakeoff()
+          else -> {}
+        }
+      }
+      GamepadAction.CONTROLLED_LAND -> commandControlledLand()
+      GamepadAction.FLIP_360 -> commandFlip360()
+      GamepadAction.TOGGLE_HEADLESS -> setHeadlessMode(!headlessMode.value)
+      GamepadAction.SNAPSHOT -> captureSnapshot()
+      GamepadAction.TOGGLE_RECORD -> toggleVideoRecording()
+      GamepadAction.TOGGLE_FAST_FLY -> setFastFly(!fastFly.value)
+      GamepadAction.MOTOR_STOP -> commandMotorStop()
+      GamepadAction.CALIBRATE_GYRO -> commandCalibrateGyro()
+      GamepadAction.EMERGENCY_STOP_CHORD -> commandEmergencyStop()
+      GamepadAction.TILT_UP -> tiltCamera(1)
+      GamepadAction.TILT_DOWN -> tiltCamera(-1)
+      GamepadAction.CYCLE_SPEED -> setSpeedTier((speedTier.value + 1) % 3)
+    }
+  }
+
+  fun updateGamepadSettings(enabled: Boolean, throttleHold: Boolean) {
+    viewModelScope.launch {
+      prefsStore.updateGamepadPrefs(enabled = enabled, throttleHold = throttleHold)
+    }
+  }
+
   private fun pushSticks() {
     viewModelScope.launch {
       flightController.sendStickInput(
@@ -314,6 +432,10 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     flightController.arm()
   }
 
+  fun commandUnlockMotors() {
+    viewModelScope.launch { flightController.unlockMotors() }
+  }
+
   fun disarmAircraft() {
     stopTargetAction()
     flightController.disarm()
@@ -321,6 +443,10 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun commandTakeoff() {
     viewModelScope.launch { flightController.takeoff() }
+  }
+
+  fun commandFlip360(direction: Int = 0) {
+    viewModelScope.launch { flightController.flip360(direction) }
   }
 
   fun commandControlledLand() {
@@ -335,6 +461,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun commandEmergencyStop() {
     stopTargetAction()
+    videoPipeline.stopRecording()
     viewModelScope.launch {
       flightController.emergencyStop()
       repository.recordTrace(
@@ -354,12 +481,28 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     viewModelScope.launch { flightController.setSpeedTier(tier) }
   }
 
+  fun setFastFly(enabled: Boolean) {
+    viewModelScope.launch { flightController.setFastFly(enabled) }
+  }
+
   fun setHeadlessMode(enabled: Boolean) {
     viewModelScope.launch { flightController.setHeadlessMode(enabled) }
   }
 
   fun tiltCamera(delta: Int) {
     viewModelScope.launch { flightController.tiltCamera(delta) }
+  }
+
+  fun captureSnapshot() {
+    videoPipeline.captureSnapshot(getApplication())
+  }
+
+  fun toggleVideoRecording() {
+    videoPipeline.toggleRecording(getApplication())
+  }
+
+  fun clearCaptureNotice() {
+    videoPipeline.clearNotice()
   }
 
   fun updateSensitivity(

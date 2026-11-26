@@ -13,12 +13,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -31,10 +29,14 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.RemoveRedEye
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.AlertDialog
@@ -49,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,9 +80,11 @@ import com.autopilot.designsystem.LocalResolvedTheme
 import com.autopilot.designsystem.VirtualStickPad
 import com.autopilot.drone.protocolapi.DroneCapabilities
 import com.autopilot.flight.control.FlightState
+import com.autopilot.video.VideoCaptureState
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.TrackedTarget
 import com.autopilot.vision.VisionFrameResult
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -93,6 +98,7 @@ fun FlightCockpitScreen(
   val flightState by viewModel.flightState.collectAsStateWithLifecycle()
   val safetyNotice by viewModel.safetyNotice.collectAsStateWithLifecycle()
   val videoState by viewModel.videoState.collectAsStateWithLifecycle()
+  val captureState by viewModel.captureState.collectAsStateWithLifecycle()
   val visionEnabled by viewModel.visionOverlayEnabled.collectAsStateWithLifecycle()
   val targetSelectionEnabled by viewModel.targetSelectionEnabled.collectAsStateWithLifecycle()
   val visionResult by viewModel.visionResult.collectAsStateWithLifecycle()
@@ -101,6 +107,7 @@ fun FlightCockpitScreen(
   val targetActionConfig by viewModel.targetActionConfig.collectAsStateWithLifecycle()
   val selectedEntry by viewModel.selectedEntry.collectAsStateWithLifecycle()
   val speedTier by viewModel.speedTier.collectAsStateWithLifecycle()
+  val fastFly by viewModel.fastFly.collectAsStateWithLifecycle()
   val headlessMode by viewModel.headlessMode.collectAsStateWithLifecycle()
   val sensitivity by viewModel.sensitivity.collectAsStateWithLifecycle()
 
@@ -113,6 +120,13 @@ fun FlightCockpitScreen(
   val caps = selectedEntry.capabilities
   val isConnected = flightState != FlightState.Disconnected
   val activeFrame = videoState as? VideoStreamState.ActiveFrame
+
+  LaunchedEffect(captureState.lastNotice) {
+    if (captureState.lastNotice != null) {
+      delay(2600L)
+      viewModel.clearCaptureNotice()
+    }
+  }
 
   // 100% Full-Screen Video Stream Root with <=30% Translucent Distraction-Free HUD Overlay
   Box(
@@ -236,8 +250,8 @@ fun FlightCockpitScreen(
         verticalAlignment = Alignment.CenterVertically,
       ) {
         Row(
-          modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp).testTag("hud_top_left"),
-          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          modifier = Modifier.weight(1f, fill = false).padding(end = 6.dp).testTag("hud_top_left"),
+          horizontalArrangement = Arrangement.spacedBy(5.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
           HudAircraftPill(
@@ -257,8 +271,12 @@ fun FlightCockpitScreen(
         }
 
         HudTopIconCluster(
+          hasActiveVideo = activeFrame != null,
+          captureState = captureState,
           targetSelectionEnabled = targetSelectionEnabled,
           visionEnabled = visionEnabled,
+          onCaptureSnapshot = { viewModel.captureSnapshot() },
+          onToggleRecord = { viewModel.toggleVideoRecording() },
           onToggleTargetSelect = { viewModel.toggleTargetSelection(!targetSelectionEnabled) },
           onOpenVision = onOpenVision,
           onOpenSettings = onOpenSettings,
@@ -266,10 +284,10 @@ fun FlightCockpitScreen(
         )
       }
 
-      // Transient Micro-Banner directly below top cluster (only when active target or alert exists)
+      // Transient Micro-Banner directly below top cluster (only when active target, capture notice, or alert exists)
       val topStatusBannerModifier =
         Modifier.align(Alignment.TopCenter)
-          .padding(top = 54.dp, start = 12.dp, end = 12.dp)
+          .padding(top = 52.dp, start = 12.dp, end = 12.dp)
           .widthIn(max = 380.dp)
 
       if (activeTargetTask != null) {
@@ -300,6 +318,41 @@ fun FlightCockpitScreen(
               )
             }
           }
+        }
+      } else if (captureState.isRecording) {
+        HudTranslucentPill(
+          modifier = topStatusBannerModifier,
+          borderColor = theme.colors.statusEmergency.copy(alpha = 0.7f),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Box(
+              modifier =
+                Modifier.size(8.dp).clip(CircleShape).background(theme.colors.statusEmergency)
+            )
+            val secs = captureState.recordingDurationSec
+            val formatted = "%02d:%02d".format(secs / 60L, secs % 60L)
+            Text(
+              text = "REC $formatted",
+              style = MaterialTheme.typography.labelSmall,
+              color = Color.White,
+              maxLines = 1,
+            )
+          }
+        }
+      } else if (captureState.lastNotice != null) {
+        HudTranslucentPill(modifier = topStatusBannerModifier) {
+          Text(
+            text = captureState.lastNotice!!,
+            style = MaterialTheme.typography.labelSmall,
+            color = theme.colors.accent,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+          )
         }
       } else if (targetSelectionEnabled && selectedTargetId != null) {
         val target = visionResult?.trackedTargets?.firstOrNull { it.trackId == selectedTargetId }
@@ -359,16 +412,19 @@ fun FlightCockpitScreen(
             Column(
               modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(),
               horizontalAlignment = Alignment.CenterHorizontally,
-              verticalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
               HudCapabilityModifiersRow(
                 caps = caps,
+                flightState = flightState,
                 speedTier = speedTier,
+                fastFly = fastFly,
                 headlessMode = headlessMode,
                 isConnected = isConnected,
                 trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
                 onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
                 onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
+                onFlip360 = { viewModel.commandFlip360() },
                 onTiltCamera = { viewModel.tiltCamera(it) },
                 onCalibrateGyro = { viewModel.commandCalibrateGyro() },
                 onOpenTrim = { showTrimDialog = true },
@@ -411,16 +467,19 @@ fun FlightCockpitScreen(
             Modifier.fillMaxWidth()
               .align(Alignment.BottomCenter)
               .padding(horizontal = 8.dp, vertical = 6.dp),
-          verticalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
           HudCapabilityModifiersRow(
             caps = caps,
+            flightState = flightState,
             speedTier = speedTier,
+            fastFly = fastFly,
             headlessMode = headlessMode,
             isConnected = isConnected,
             trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
             onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
             onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
+            onFlip360 = { viewModel.commandFlip360() },
             onTiltCamera = { viewModel.tiltCamera(it) },
             onCalibrateGyro = { viewModel.commandCalibrateGyro() },
             onOpenTrim = { showTrimDialog = true },
@@ -664,13 +723,13 @@ private fun HudAircraftPill(
     modifier =
       modifier
         .testTag("aircraft_selector_pill")
-        .defaultMinSize(minHeight = 38.dp)
+        .defaultMinSize(minHeight = 36.dp)
         .clickable(onClick = onClick),
   ) {
     Row(
-      modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+      modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(5.dp),
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
       Box(
         modifier =
@@ -690,7 +749,7 @@ private fun HudAircraftPill(
         Icons.Default.ArrowDropDown,
         contentDescription = "Select aircraft",
         tint = Color.White.copy(alpha = 0.75f),
-        modifier = Modifier.size(16.dp),
+        modifier = Modifier.size(15.dp),
       )
     }
   }
@@ -707,7 +766,7 @@ private fun HudConnectPill(
     modifier =
       modifier
         .testTag("connect_toggle_button")
-        .defaultMinSize(minHeight = 38.dp)
+        .defaultMinSize(minHeight = 36.dp)
         .clickable(onClick = onClick),
     fillColor =
       if (isConnected) Color.Black.copy(alpha = 0.38f)
@@ -718,7 +777,7 @@ private fun HudConnectPill(
   ) {
     Box(
       contentAlignment = Alignment.Center,
-      modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+      modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
     ) {
       Text(
         text = if (isConnected) "Disconnect" else "Connect",
@@ -732,8 +791,12 @@ private fun HudConnectPill(
 
 @Composable
 private fun HudTopIconCluster(
+  hasActiveVideo: Boolean,
+  captureState: VideoCaptureState,
   targetSelectionEnabled: Boolean,
   visionEnabled: Boolean,
+  onCaptureSnapshot: () -> Unit,
+  onToggleRecord: () -> Unit,
   onToggleTargetSelect: () -> Unit,
   onOpenVision: () -> Unit,
   onOpenSettings: () -> Unit,
@@ -746,36 +809,65 @@ private fun HudTopIconCluster(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       IconButton(
+        onClick = onCaptureSnapshot,
+        enabled = hasActiveVideo,
+        modifier = Modifier.size(34.dp).minimumInteractiveComponentSize().testTag("snapshot_button"),
+      ) {
+        Icon(
+          Icons.Default.PhotoCamera,
+          contentDescription = "Capture FPV snapshot",
+          tint = if (hasActiveVideo) Color.White.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.35f),
+          modifier = Modifier.size(17.dp),
+        )
+      }
+      IconButton(
+        onClick = onToggleRecord,
+        enabled = hasActiveVideo || captureState.isRecording,
+        modifier = Modifier.size(34.dp).minimumInteractiveComponentSize().testTag("record_video_button"),
+      ) {
+        Icon(
+          imageVector = if (captureState.isRecording) Icons.Default.Stop else Icons.Default.FiberManualRecord,
+          contentDescription = if (captureState.isRecording) "Stop recording" else "Start MP4 recording",
+          tint =
+            when {
+              captureState.isRecording -> theme.colors.statusEmergency
+              hasActiveVideo -> Color.White.copy(alpha = 0.9f)
+              else -> Color.White.copy(alpha = 0.35f)
+            },
+          modifier = Modifier.size(17.dp),
+        )
+      }
+      IconButton(
         onClick = onToggleTargetSelect,
-        modifier = Modifier.size(40.dp).minimumInteractiveComponentSize().testTag("target_select_toggle"),
+        modifier = Modifier.size(34.dp).minimumInteractiveComponentSize().testTag("target_select_toggle"),
       ) {
         Icon(
           Icons.Default.CenterFocusWeak,
           contentDescription = "Toggle target selection on video",
           tint = if (targetSelectionEnabled) theme.colors.accent else Color.White.copy(alpha = 0.85f),
-          modifier = Modifier.size(19.dp),
+          modifier = Modifier.size(17.dp),
         )
       }
       IconButton(
         onClick = onOpenVision,
-        modifier = Modifier.size(40.dp).minimumInteractiveComponentSize().testTag("open_vision_button"),
+        modifier = Modifier.size(34.dp).minimumInteractiveComponentSize().testTag("open_vision_button"),
       ) {
         Icon(
           Icons.Default.RemoveRedEye,
           contentDescription = "Open Computer Vision",
           tint = if (visionEnabled) theme.colors.accent else Color.White.copy(alpha = 0.85f),
-          modifier = Modifier.size(19.dp),
+          modifier = Modifier.size(17.dp),
         )
       }
       IconButton(
         onClick = onOpenSettings,
-        modifier = Modifier.size(40.dp).minimumInteractiveComponentSize().testTag("open_settings_button"),
+        modifier = Modifier.size(34.dp).minimumInteractiveComponentSize().testTag("open_settings_button"),
       ) {
         Icon(
           Icons.Default.Settings,
           contentDescription = "Open Settings",
           tint = Color.White.copy(alpha = 0.85f),
-          modifier = Modifier.size(19.dp),
+          modifier = Modifier.size(17.dp),
         )
       }
     }
@@ -786,32 +878,38 @@ private fun HudTopIconCluster(
 @Composable
 private fun HudCapabilityModifiersRow(
   caps: DroneCapabilities,
+  flightState: FlightState,
   speedTier: Int,
+  fastFly: Boolean,
   headlessMode: Boolean,
   isConnected: Boolean,
   trimActive: Boolean,
   onCycleSpeedTier: () -> Unit,
   onToggleHeadless: () -> Unit,
+  onFlip360: () -> Unit,
   onTiltCamera: (Int) -> Unit,
   onCalibrateGyro: () -> Unit,
   onOpenTrim: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val theme = LocalResolvedTheme.current
+  val canFlip = isConnected && (flightState == FlightState.Armed || flightState == FlightState.Flying)
+
   FlowRow(
     modifier = modifier,
-    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+    horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
     verticalArrangement = Arrangement.spacedBy(4.dp),
   ) {
     if (caps.supportsSpeedTiers) {
-      val speedLabel = when (speedTier) {
-        0 -> "Spd L"
-        1 -> "Spd M"
-        else -> "Spd H"
-      }
+      val speedLabel =
+        when {
+          fastFly || speedTier >= 2 -> if (caps.supportsFastFly) "Fast" else "Spd H"
+          speedTier == 1 -> "Spd M"
+          else -> "Spd L"
+        }
       HudOverlayMiniButton(
         label = speedLabel,
-        active = speedTier > 0,
+        active = speedTier > 0 || fastFly,
         onClick = onCycleSpeedTier,
         tag = "speed_tier_cycle",
       )
@@ -827,19 +925,29 @@ private fun HudCapabilityModifiersRow(
       )
     }
 
+    if (caps.supportsFlip) {
+      HudOverlayMiniButton(
+        label = "Flip",
+        enabled = canFlip,
+        onClick = onFlip360,
+        icon = Icons.Default.FlipCameraAndroid,
+        tag = "flip_360_chip",
+      )
+    }
+
     if (caps.supportsCameraTilt) {
       HudTranslucentPill {
         Row(verticalAlignment = Alignment.CenterVertically) {
           IconButton(
             onClick = { onTiltCamera(-1) },
             enabled = isConnected,
-            modifier = Modifier.size(32.dp).testTag("camera_tilt_down_button"),
+            modifier = Modifier.size(30.dp).testTag("camera_tilt_down_button"),
           ) {
             Icon(
               Icons.Default.KeyboardArrowDown,
               contentDescription = "Tilt camera down",
               tint = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
-              modifier = Modifier.size(16.dp),
+              modifier = Modifier.size(15.dp),
             )
           }
           Text(
@@ -850,13 +958,13 @@ private fun HudCapabilityModifiersRow(
           IconButton(
             onClick = { onTiltCamera(1) },
             enabled = isConnected,
-            modifier = Modifier.size(32.dp).testTag("camera_tilt_up_button"),
+            modifier = Modifier.size(30.dp).testTag("camera_tilt_up_button"),
           ) {
             Icon(
               Icons.Default.KeyboardArrowUp,
               contentDescription = "Tilt camera up",
               tint = if (isConnected) Color.White else Color.White.copy(alpha = 0.4f),
-              modifier = Modifier.size(16.dp),
+              modifier = Modifier.size(15.dp),
             )
           }
         }
@@ -899,13 +1007,13 @@ private fun HudOverlayMiniButton(
     highlighted = active,
     modifier =
       Modifier.testTag(tag)
-        .defaultMinSize(minHeight = 32.dp)
+        .defaultMinSize(minHeight = 30.dp)
         .clickable(enabled = enabled, onClick = onClick),
   ) {
     Row(
-      modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+      modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(4.dp),
+      horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
       if (icon != null) {
         Icon(
@@ -917,7 +1025,7 @@ private fun HudOverlayMiniButton(
               active -> accent
               else -> Color.White.copy(alpha = 0.85f)
             },
-          modifier = Modifier.size(14.dp),
+          modifier = Modifier.size(13.dp),
         )
       }
       Text(
@@ -968,8 +1076,14 @@ private fun HudPrimaryActionsRow(
         flightState == FlightState.Ready ||
           flightState == FlightState.Connected ||
           flightState == FlightState.Emergency
+      val armLabel =
+        when {
+          flightState == FlightState.Emergency -> "Reset"
+          caps.supportsUnlockCommand -> "Unlock"
+          else -> "Arm"
+        }
       HudActionButton(
-        text = if (flightState == FlightState.Emergency) "Reset" else "Arm",
+        text = armLabel,
         enabled = armEnabled,
         onClick = onArmOrReset,
         fillColor = Color.Black.copy(alpha = 0.38f),
@@ -1207,12 +1321,14 @@ private fun flightStateColor(
   when (state) {
     is FlightState.Ready,
     is FlightState.Connected,
-    is FlightState.Flying -> colors.accent
-    is FlightState.Emergency,
-    is FlightState.Fault,
-    is FlightState.ConnectionLost -> colors.statusEmergency
     is FlightState.Armed,
     is FlightState.TakingOff,
-    is FlightState.Landing -> colors.statusWarning
-    else -> colors.textSecondary
+    is FlightState.Flying,
+    is FlightState.Landing -> colors.statusNominal
+    is FlightState.Discovering,
+    is FlightState.Connecting -> colors.statusWarning
+    is FlightState.Emergency,
+    is FlightState.ConnectionLost,
+    is FlightState.Fault -> colors.statusEmergency
+    is FlightState.Disconnected -> colors.textSecondary
   }

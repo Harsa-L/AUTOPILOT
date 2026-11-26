@@ -19,6 +19,7 @@ enum class ProtocolFamily(val wireId: Int) {
 enum class VideoTransportType {
   NONE,
   RTSP_H264,
+  RTSP_H265,
   RTP_JPEG,
   RAW_UDP_JPEG,
   RAW_UDP_H264,
@@ -52,6 +53,11 @@ data class DroneCapabilities(
   val reportsAltitudeMeters: Boolean,
   val reportsGps: Boolean,
   val primaryLandingSemantics: TerminationSemantics,
+  val supportsFlip: Boolean = false,
+  val supportsUnlockCommand: Boolean = false,
+  val supportsFastFly: Boolean = false,
+  val supportsVideoRecording: Boolean = false,
+  val supportedVideoModes: List<VideoTransportType> = emptyList(),
 )
 
 @Serializable
@@ -74,6 +80,7 @@ data class ProtocolDescriptor(
   val knownLimitations: List<String>,
   val provenanceNote: String,
   val isSyntheticHarness: Boolean = false,
+  val alternateHostIps: List<String> = emptyList(),
 )
 
 data class ConnectionConfig(
@@ -85,6 +92,7 @@ data class ConnectionConfig(
   val ssid: String? = null,
   val networkHandle: Long? = null,
   val allowSyntheticHarness: Boolean = false,
+  val videoTransportOverride: VideoTransportType? = null,
 )
 
 sealed interface ConnectionState {
@@ -129,6 +137,12 @@ sealed interface FlightCommand {
 
   data class CameraTilt(val delta: Int) : FlightCommand
 
+  data class Flip360(val direction: Int = 0) : FlightCommand
+
+  data object UnlockMotors : FlightCommand
+
+  data class SetFastFly(val enabled: Boolean) : FlightCommand
+
   data object RequestKeyframe : FlightCommand
 }
 
@@ -148,6 +162,7 @@ data class DroneTelemetry(
   val altitudeMeters: Float?,
   val lastCommandHex: String,
   val isSyntheticHarness: Boolean = false,
+  val firmwareStatusFlags: Int? = null,
 )
 
 data class VideoFramePacket(

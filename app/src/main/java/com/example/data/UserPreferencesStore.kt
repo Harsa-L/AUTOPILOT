@@ -32,6 +32,10 @@ data class AutopilotUserPrefs(
   val calibrationVerified: Boolean = false,
   val thermalDegradeBlur: Boolean = false,
   val selectedProtocolId: String = "s2x",
+  val selectedVideoTransport: String = "AUTO",
+  val customHostIp: String = "",
+  val gamepadEnabled: Boolean = true,
+  val gamepadThrottleHold: Boolean = false,
 )
 
 class UserPreferencesStore(private val context: Context) {
@@ -53,6 +57,10 @@ class UserPreferencesStore(private val context: Context) {
     val CALIBRATION_VERIFIED = booleanPreferencesKey("calibration_verified")
     val THERMAL_DEGRADE_BLUR = booleanPreferencesKey("thermal_degrade_blur")
     val SELECTED_PROTOCOL_ID = stringPreferencesKey("selected_protocol_id")
+    val SELECTED_VIDEO_TRANSPORT = stringPreferencesKey("selected_video_transport")
+    val CUSTOM_HOST_IP = stringPreferencesKey("custom_host_ip")
+    val GAMEPAD_ENABLED = booleanPreferencesKey("gamepad_enabled")
+    val GAMEPAD_THROTTLE_HOLD = booleanPreferencesKey("gamepad_throttle_hold")
   }
 
   val preferences: Flow<AutopilotUserPrefs> =
@@ -78,6 +86,10 @@ class UserPreferencesStore(private val context: Context) {
         calibrationVerified = prefs[Keys.CALIBRATION_VERIFIED] ?: false,
         thermalDegradeBlur = prefs[Keys.THERMAL_DEGRADE_BLUR] ?: false,
         selectedProtocolId = prefs[Keys.SELECTED_PROTOCOL_ID] ?: "s2x",
+        selectedVideoTransport = prefs[Keys.SELECTED_VIDEO_TRANSPORT] ?: "AUTO",
+        customHostIp = prefs[Keys.CUSTOM_HOST_IP] ?: "",
+        gamepadEnabled = prefs[Keys.GAMEPAD_ENABLED] ?: true,
+        gamepadThrottleHold = prefs[Keys.GAMEPAD_THROTTLE_HOLD] ?: false,
       )
     }
 
@@ -130,5 +142,19 @@ class UserPreferencesStore(private val context: Context) {
 
   suspend fun updateSelectedProtocol(protocolId: String) {
     context.autopilotPrefsDataStore.edit { prefs -> prefs[Keys.SELECTED_PROTOCOL_ID] = protocolId }
+  }
+
+  suspend fun updateStreamOverrides(videoTransportName: String, hostIp: String) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.SELECTED_VIDEO_TRANSPORT] = videoTransportName
+      prefs[Keys.CUSTOM_HOST_IP] = hostIp
+    }
+  }
+
+  suspend fun updateGamepadPrefs(enabled: Boolean, throttleHold: Boolean) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.GAMEPAD_ENABLED] = enabled
+      prefs[Keys.GAMEPAD_THROTTLE_HOLD] = throttleHold
+    }
   }
 }

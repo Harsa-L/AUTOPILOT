@@ -11,7 +11,7 @@ data class ProtocolRegistryEntry(
 /**
  * Single source of truth for protocol metadata, transport bindings, capability flags,
  * and honest hardware provenance derived from the Apache-2.0 TurboDrone project
- * (github.com/Nero-Disney/turbodrone / marshallrichards/turbodrone).
+ * (github.com/marshallrichards/turbodrone).
  *
  * SSID hints are advisory discovery cues only and never establish protocol compatibility alone.
  */
@@ -35,8 +35,8 @@ object ProtocolCompatibilityRegistry {
             videoTransport = VideoTransportType.RAW_UDP_JPEG,
             verificationStatus = VerificationStatus.IMPLEMENTED,
             implementationStatus = ImplementationStatus.IMPLEMENTED_UNVERIFIED,
-            knownModels = listOf("Hiturbo S20", "Loiley S29"),
-            ssidHints = listOf("Vison-", "FLOW-", "WiFi-S20", "S29-"),
+            knownModels = listOf("Hiturbo S20", "Loiley S29", "PL-515"),
+            ssidHints = listOf("Vison-", "FLOW-", "WiFi-S20", "S29-", "PL-515"),
             knownLimitations =
               listOf(
                 "No barometer altitude, GPS, or battery telemetry exposed in standard UDP stream.",
@@ -57,13 +57,18 @@ object ProtocolCompatibilityRegistry {
             supportsAltitudeHold = false,
             supportsSpeedTiers = true,
             supportsCameraTilt = false,
-            supportsPhotoCapture = false,
+            supportsPhotoCapture = true,
             supportsVideoStream = true,
             reportsBatteryPercent = false,
             reportsSignalRssi = false,
             reportsAltitudeMeters = false,
             reportsGps = false,
             primaryLandingSemantics = TerminationSemantics.CONTROLLED_LANDING,
+            supportsFlip = true,
+            supportsUnlockCommand = true,
+            supportsFastFly = true,
+            supportsVideoRecording = true,
+            supportedVideoModes = listOf(VideoTransportType.RAW_UDP_JPEG),
           ),
       ),
       ProtocolRegistryEntry(
@@ -71,7 +76,7 @@ object ProtocolCompatibilityRegistry {
           ProtocolDescriptor(
             id = "wifi_uav",
             family = ProtocolFamily.WIFI_UAV,
-            displayName = "WiFi UAV (V88 / D16 / BL60x)",
+            displayName = "WiFi UAV (V88 / V66 / D16 / GT3)",
             companionAppFamily = "WiFi UAV",
             defaultHostIp = "192.168.169.1",
             controlPort = 8800,
@@ -82,12 +87,12 @@ object ProtocolCompatibilityRegistry {
             videoTransport = VideoTransportType.RAW_UDP_JPEG,
             verificationStatus = VerificationStatus.IMPLEMENTED,
             implementationStatus = ImplementationStatus.IMPLEMENTED_UNVERIFIED,
-            knownModels = listOf("V88", "D16", "K417 (BL60x camera module)"),
-            ssidHints = listOf("WIFI_UAV_", "FLOW_4K_", "V88_"),
+            knownModels = listOf("V88", "V66", "D16", "GT3", "K417 (BL60x camera module)"),
+            ssidHints = listOf("WIFI_UAV_", "FLOW_4K_", "V88_", "V66_", "GT3_"),
             knownLimitations =
               listOf(
-                "Subnet commonly 192.168.169.x; firmware variants differ on JPEG/H.264 stream triggers.",
-                "No verified battery or altitude telemetry.",
+                "Subnet commonly 192.168.169.x; firmware variants differ between JPEG and H.264 UDP streams.",
+                "No verified barometer altitude or GPS telemetry.",
                 "Unverified on physical Android hardware in this workspace.",
               ),
             provenanceNote =
@@ -104,13 +109,18 @@ object ProtocolCompatibilityRegistry {
             supportsAltitudeHold = false,
             supportsSpeedTiers = true,
             supportsCameraTilt = false,
-            supportsPhotoCapture = false,
+            supportsPhotoCapture = true,
             supportsVideoStream = true,
             reportsBatteryPercent = false,
             reportsSignalRssi = false,
             reportsAltitudeMeters = false,
             reportsGps = false,
             primaryLandingSemantics = TerminationSemantics.CONTROLLED_LANDING,
+            supportsFlip = true,
+            supportsUnlockCommand = true,
+            supportsFastFly = true,
+            supportsVideoRecording = true,
+            supportedVideoModes = listOf(VideoTransportType.RAW_UDP_JPEG, VideoTransportType.RAW_UDP_H264),
           ),
       ),
       ProtocolRegistryEntry(
@@ -151,13 +161,18 @@ object ProtocolCompatibilityRegistry {
             supportsAltitudeHold = false,
             supportsSpeedTiers = true,
             supportsCameraTilt = false,
-            supportsPhotoCapture = false,
+            supportsPhotoCapture = true,
             supportsVideoStream = true,
             reportsBatteryPercent = false,
             reportsSignalRssi = false,
             reportsAltitudeMeters = false,
             reportsGps = false,
             primaryLandingSemantics = TerminationSemantics.CONTROLLED_LANDING,
+            supportsFlip = true,
+            supportsUnlockCommand = true,
+            supportsFastFly = true,
+            supportsVideoRecording = true,
+            supportedVideoModes = listOf(VideoTransportType.RTSP_H264),
           ),
       ),
       ProtocolRegistryEntry(
@@ -180,12 +195,12 @@ object ProtocolCompatibilityRegistry {
             ssidHints = listOf("JL_FPV_", "KY_FPV_"),
             knownLimitations =
               listOf(
-                "Experimental CTP TCP control + RTP/JPEG UDP stream negotiation.",
+                "Experimental CTP TCP (:3333) control + RTP/JPEG UDP (:2222) stream negotiation.",
                 "No battery, GPS, or optical altitude telemetry.",
                 "Requires physical Jieli firmware capture for full validation.",
               ),
             provenanceNote =
-              "CTP control and RTP/JPEG transport modeled after TurboDrone (Apache-2.0) cooingdv_jieli adapter.",
+              "CTP TCP control and RTP/JPEG transport modeled after TurboDrone (Apache-2.0) cooingdv_jieli adapter.",
           ),
         capabilities =
           DroneCapabilities(
@@ -198,13 +213,18 @@ object ProtocolCompatibilityRegistry {
             supportsAltitudeHold = false,
             supportsSpeedTiers = false,
             supportsCameraTilt = false,
-            supportsPhotoCapture = false,
+            supportsPhotoCapture = true,
             supportsVideoStream = true,
             reportsBatteryPercent = false,
             reportsSignalRssi = false,
             reportsAltitudeMeters = false,
             reportsGps = false,
             primaryLandingSemantics = TerminationSemantics.UNVERIFIED_TERMINATION,
+            supportsFlip = false,
+            supportsUnlockCommand = false,
+            supportsFastFly = false,
+            supportsVideoRecording = true,
+            supportedVideoModes = listOf(VideoTransportType.RTP_JPEG),
           ),
       ),
       ProtocolRegistryEntry(
@@ -245,13 +265,18 @@ object ProtocolCompatibilityRegistry {
             supportsAltitudeHold = false,
             supportsSpeedTiers = false,
             supportsCameraTilt = false,
-            supportsPhotoCapture = false,
+            supportsPhotoCapture = true,
             supportsVideoStream = true,
             reportsBatteryPercent = false,
             reportsSignalRssi = false,
             reportsAltitudeMeters = false,
             reportsGps = false,
             primaryLandingSemantics = TerminationSemantics.UNVERIFIED_TERMINATION,
+            supportsFlip = true,
+            supportsUnlockCommand = false,
+            supportsFastFly = false,
+            supportsVideoRecording = true,
+            supportedVideoModes = listOf(VideoTransportType.RAW_UDP_JPEG),
           ),
       ),
       ProtocolRegistryEntry(
@@ -265,7 +290,7 @@ object ProtocolCompatibilityRegistry {
             controlPort = 1234,
             videoPort = 1234,
             heartbeatPort = 7080,
-            rtspPath = "rtsp://192.168.1.1:7070/webcam",
+            rtspPath = "/live/ch00_1",
             controlRateHz = 25,
             videoTransport = VideoTransportType.RAW_UDP_H265,
             verificationStatus = VerificationStatus.EXPERIMENTAL,
@@ -274,12 +299,13 @@ object ProtocolCompatibilityRegistry {
             ssidHints = listOf("X69-", "LG_DRONE_"),
             knownLimitations =
               listOf(
-                "Supports dual H.265 UDP (:1234) or RTSP (:7070) modes depending on board revision.",
+                "Supports H.265 UDP (:1234), RTSP HEVC (/live/ch00_1 or :7070/webcam), or legacy UDP JPEG.",
                 "Camera tilt steps are uncalibrated relative increments.",
                 "Experimental implementation not yet physically verified.",
               ),
             provenanceNote =
-              "Packet format, camera tilt flags, and H.265 stream layout derived from TurboDrone (Apache-2.0) x69_lg driver.",
+              "Packet format, camera tilt flags, and H.265/RTSP stream layout derived from TurboDrone (Apache-2.0) x69_lg driver.",
+            alternateHostIps = listOf("172.16.11.1"),
           ),
         capabilities =
           DroneCapabilities(
@@ -292,13 +318,24 @@ object ProtocolCompatibilityRegistry {
             supportsAltitudeHold = false,
             supportsSpeedTiers = true,
             supportsCameraTilt = true,
-            supportsPhotoCapture = false,
+            supportsPhotoCapture = true,
             supportsVideoStream = true,
             reportsBatteryPercent = false,
             reportsSignalRssi = false,
             reportsAltitudeMeters = false,
             reportsGps = false,
             primaryLandingSemantics = TerminationSemantics.CONTROLLED_LANDING,
+            supportsFlip = true,
+            supportsUnlockCommand = true,
+            supportsFastFly = true,
+            supportsVideoRecording = true,
+            supportedVideoModes =
+              listOf(
+                VideoTransportType.RAW_UDP_H265,
+                VideoTransportType.RTSP_H265,
+                VideoTransportType.RTSP_H264,
+                VideoTransportType.RAW_UDP_JPEG,
+              ),
           ),
       ),
     )
@@ -346,13 +383,18 @@ object ProtocolCompatibilityRegistry {
           supportsAltitudeHold = false,
           supportsSpeedTiers = true,
           supportsCameraTilt = true,
-          supportsPhotoCapture = false,
+          supportsPhotoCapture = true,
           supportsVideoStream = true,
           reportsBatteryPercent = false,
           reportsSignalRssi = false,
           reportsAltitudeMeters = false,
           reportsGps = false,
           primaryLandingSemantics = TerminationSemantics.CONTROLLED_LANDING,
+          supportsFlip = true,
+          supportsUnlockCommand = true,
+          supportsFastFly = true,
+          supportsVideoRecording = true,
+          supportedVideoModes = listOf(VideoTransportType.SYNTHETIC_TEST_PATTERN),
         ),
     )
 

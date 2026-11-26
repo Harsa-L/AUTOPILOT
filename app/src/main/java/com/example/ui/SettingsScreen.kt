@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Flight
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +67,7 @@ import com.autopilot.designsystem.LocalResolvedTheme
 import com.autopilot.designsystem.StatusBadge
 import com.autopilot.designsystem.StatusTone
 import com.autopilot.designsystem.ThemeAppearanceMode
+import com.autopilot.drone.protocolapi.VideoTransportType
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -86,6 +88,7 @@ fun SettingsScreen(
   val sensitivity by viewModel.sensitivity.collectAsStateWithLifecycle()
   val themeState by viewModel.themeState.collectAsStateWithLifecycle()
   val sessions by viewModel.flightSessions.collectAsStateWithLifecycle()
+  val gamepadStatus by viewModel.gamepadStatus.collectAsStateWithLifecycle()
 
   Scaffold(
     modifier = modifier.fillMaxSize(),
@@ -111,11 +114,14 @@ fun SettingsScreen(
         )
       }
       item {
+        val padSummary =
+          if (gamepadStatus.connected) " · Gamepad: ${gamepadStatus.controllerName ?: "Connected"}"
+          else ""
         SettingsNavRow(
           icon = Icons.Default.Tune,
-          title = "Flight Controls & Trim",
+          title = "Flight Controls, Gamepad & Trim",
           subtitle =
-            "Deadzone ${(sensitivity.deadzone * 100).toInt()}% · Expo ${(sensitivity.expo * 100).toInt()}% · Cap ${(sensitivity.maxThrottleCap * 100).toInt()}%",
+            "Deadzone ${(sensitivity.deadzone * 100).toInt()}% · Expo ${(sensitivity.expo * 100).toInt()}%$padSummary",
           onClick = onOpenFlightControls,
           tag = "settings_row_controls",
           modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth(),
@@ -156,7 +162,9 @@ fun SettingsAircraftScreen(
   val context = LocalContext.current
   val selectedEntry by viewModel.selectedEntry.collectAsStateWithLifecycle()
   val hostIp by viewModel.customHostIp.collectAsStateWithLifecycle()
+  val videoOverride by viewModel.videoTransportOverride.collectAsStateWithLifecycle()
   val wifiLink by viewModel.wifiLink.collectAsStateWithLifecycle()
+  val detectedMatch = remember(wifiLink.ssid) { viewModel.detectedProtocolFromWifi() }
 
   val requiredPermissions = remember {
     buildList {
@@ -192,6 +200,8 @@ fun SettingsAircraftScreen(
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
       item {
+        val desc = selectedEntry.descriptor
+        val caps = selectedEntry.capabilities
         AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth(), elevated = true) {
           Text(
             text = "Connection Gateway",
@@ -206,6 +216,41 @@ fun SettingsAircraftScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth().testTag("host_ip_input"),
           )
+          if (desc.alternateHostIps.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+              (listOf(desc.defaultHostIp) + desc.alternateHostIps).distinct().forEach { presetIp ->
+                FilterChip(
+                  selected = hostIp == presetIp,
+                  onClick = { viewModel.updateHostIp(presetIp) },
+                  label = { Text(presetIp) },
+                )
+              }
+            }
+          }
+          if (caps.supportedVideoModes.size > 1) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+              text = "Video Stream Mode",
+              style = MaterialTheme.typography.labelMedium,
+              color = theme.colors.textSecondary,
+            )
+            Spacer(Modifier.height(4.dp))
+            FlowRow(
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+              val activeMode = videoOverride ?: desc.videoTransport
+              caps.supportedVideoModes.forEach { mode ->
+                FilterChip(
+                  selected = activeMode == mode,
+                  onClick = { viewModel.selectVideoTransportOverride(mode) },
+                  label = { Text(formatVideoModeLabel(mode)) },
+                  modifier = Modifier.testTag("video_mode_${mode.name.lowercase()}"),
+                )
+              }
+            }
+          }
           Spacer(Modifier.height(10.dp))
           FlowRow(
             modifier = Modifier.fillMaxWidth(),
@@ -244,6 +289,16 @@ fun SettingsAircraftScreen(
               style = MaterialTheme.typography.bodySmall,
               color = theme.colors.textSecondary,
             )
+            if (detectedMatch != null && detectedMatch.descriptor.id != desc.id) {
+              Spacer(Modifier.height(6.dp))
+              AutopilotButton(
+                text = "Match ${detectedMatch.descriptor.displayName.substringBefore(" (")}",
+                onClick = { viewModel.selectProtocol(detectedMatch.descriptor.id) },
+                tone = AutopilotButtonTone.PRIMARY,
+                compact = true,
+                tag = "auto_match_wifi_protocol_button",
+              )
+            }
           }
         }
       }
@@ -261,12 +316,17 @@ fun SettingsAircraftScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
           ) {
+            if (caps.supportsUnlockCommand) StatusBadge("Wire Unlock", StatusTone.NOMINAL)
             if (caps.supportsTakeoff) StatusBadge("Takeoff", StatusTone.NOMINAL)
             if (caps.supportsControlledLanding) StatusBadge("Controlled Land", StatusTone.NOMINAL)
+            if (caps.supportsFlip) StatusBadge("360° Flip", StatusTone.NOMINAL)
+            if (caps.supportsFastFly) StatusBadge("Fast Fly", StatusTone.NOMINAL)
             if (caps.supportsSpeedTiers) StatusBadge("Speed Tiers", StatusTone.NOMINAL)
             if (caps.supportsHeadlessMode) StatusBadge("Headless Mode", StatusTone.NOMINAL)
             if (caps.supportsGyroCalibration) StatusBadge("Gyro Cal", StatusTone.NOMINAL)
             if (caps.supportsCameraTilt) StatusBadge("Camera Tilt", StatusTone.NOMINAL)
+            if (caps.supportsPhotoCapture) StatusBadge("Snapshot", StatusTone.NOMINAL)
+            if (caps.supportsVideoRecording) StatusBadge("MP4 Record", StatusTone.NOMINAL)
             if (caps.supportsEmergencyMotorStop) StatusBadge("E-Stop", StatusTone.WARNING)
           }
         }
@@ -338,6 +398,8 @@ fun SettingsFlightControlsScreen(
 ) {
   val theme = LocalResolvedTheme.current
   val sensitivity by viewModel.sensitivity.collectAsStateWithLifecycle()
+  val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
+  val gamepadStatus by viewModel.gamepadStatus.collectAsStateWithLifecycle()
 
   Scaffold(
     modifier = modifier.fillMaxSize(),
@@ -398,6 +460,84 @@ fun SettingsFlightControlsScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
           ) {
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              modifier = Modifier.weight(1f),
+            ) {
+              Icon(
+                imageVector = Icons.Default.SportsEsports,
+                contentDescription = null,
+                tint = theme.colors.accent,
+                modifier = Modifier.size(20.dp),
+              )
+              Text(
+                text = "Bluetooth & USB Gamepad",
+                style = MaterialTheme.typography.titleMedium,
+                color = theme.colors.textPrimary,
+              )
+            }
+            StatusBadge(
+              label = if (gamepadStatus.connected) "Connected" else "None Paired",
+              tone = if (gamepadStatus.connected) StatusTone.NOMINAL else StatusTone.MUTED,
+            )
+          }
+          if (gamepadStatus.controllerName != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+              text = "Active device: ${gamepadStatus.controllerName}",
+              style = MaterialTheme.typography.bodySmall,
+              color = theme.colors.accent,
+            )
+          }
+          Spacer(Modifier.height(10.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text("Enable Hardware Controller", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Overrides touch sticks & Vision servoing when moved", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.gamepadEnabled,
+              onCheckedChange = { viewModel.updateGamepadSettings(it, prefs.gamepadThrottleHold) },
+              modifier = Modifier.testTag("gamepad_enable_switch"),
+            )
+          }
+          Spacer(Modifier.height(8.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text("Incremental Throttle Hold", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Off: Spring-center altitude hold · On: Accumulate throttle", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.gamepadThrottleHold,
+              onCheckedChange = { viewModel.updateGamepadSettings(prefs.gamepadEnabled, it) },
+              modifier = Modifier.testTag("gamepad_throttle_hold_switch"),
+            )
+          }
+          Spacer(Modifier.height(10.dp))
+          Text(
+            text = "Mode 2 Map · L-Stick: Throttle/Yaw · R-Stick: Roll/Pitch · A: Arm/Takeoff · B: Land · X: Flip · Y: Headless · L1/R1: Snap/Record · L2: Fast Fly · R2: Stop · L2+R2: E-STOP",
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.colors.textSecondary,
+          )
+        }
+      }
+
+      item {
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
             Text(
               text = "Attitude Trim",
               style = MaterialTheme.typography.titleMedium,
@@ -432,6 +572,18 @@ fun SettingsFlightControlsScreen(
     }
   }
 }
+
+private fun formatVideoModeLabel(mode: VideoTransportType): String =
+  when (mode) {
+    VideoTransportType.RAW_UDP_JPEG -> "UDP JPEG"
+    VideoTransportType.RTP_JPEG -> "RTP JPEG"
+    VideoTransportType.RAW_UDP_H264 -> "UDP H.264"
+    VideoTransportType.RAW_UDP_H265 -> "UDP H.265"
+    VideoTransportType.RTSP_H264 -> "RTSP H.264"
+    VideoTransportType.RTSP_H265 -> "RTSP H.265"
+    VideoTransportType.SYNTHETIC_TEST_PATTERN -> "Harness"
+    VideoTransportType.NONE -> "None"
+  }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable

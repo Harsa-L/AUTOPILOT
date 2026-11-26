@@ -11,6 +11,9 @@ object NativeActionFlags {
   const val EMERGENCY_STOP = 1 shl 3
   const val CALIBRATE_GYRO = 1 shl 4
   const val HEADLESS = 1 shl 5
+  const val FLIP_360 = 1 shl 6
+  const val UNLOCK_MOTORS = 1 shl 7
+  const val FAST_FLY = 1 shl 8
 }
 
 data class NativeSessionCounters(
@@ -21,6 +24,8 @@ data class NativeSessionCounters(
   val packetsReceived: Long,
   val droppedPackets: Long,
   val lastRxTimestampMs: Long,
+  val batteryPercent: Int? = null,
+  val firmwareStatusFlags: Int? = null,
 )
 
 data class NativeVideoFrameMeta(
@@ -31,6 +36,7 @@ data class NativeVideoFrameMeta(
   val height: Int,
   val byteLength: Int,
   val isSynthetic: Boolean,
+  val isKeyFrame: Boolean = true,
 )
 
 /**
@@ -68,9 +74,13 @@ object AutopilotNativeBridge {
         packetsReceived = 0L,
         droppedPackets = 0L,
         lastRxTimestampMs = 0L,
+        batteryPercent = null,
+        firmwareStatusFlags = null,
       )
     }
     val arr = nativeReadSessionCounters(handle)
+    val batteryRaw = if (arr.size > 7) arr[7].toInt() else -1
+    val statusRaw = if (arr.size > 8) arr[8].toInt() else -1
     return NativeSessionCounters(
       running = arr[0] != 0L,
       connected = arr[1] != 0L,
@@ -79,6 +89,8 @@ object AutopilotNativeBridge {
       packetsReceived = arr[4],
       droppedPackets = arr[5],
       lastRxTimestampMs = arr[6],
+      batteryPercent = batteryRaw.takeIf { it in 0..100 },
+      firmwareStatusFlags = statusRaw.takeIf { it >= 0 },
     )
   }
 
@@ -98,6 +110,7 @@ object AutopilotNativeBridge {
       height = metaOut[4].toInt(),
       byteLength = metaOut[5].toInt(),
       isSynthetic = metaOut[6] != 0L,
+      isKeyFrame = if (metaOut.size > 7) metaOut[7] != 0L else true,
     )
   }
 
@@ -108,6 +121,7 @@ object AutopilotNativeBridge {
     controlPort: Int,
     videoPort: Int,
     heartbeatPort: Int,
+    rtspPath: String,
     controlRateHz: Int,
     networkHandle: Long,
     allowSyntheticHarness: Boolean,
@@ -132,6 +146,10 @@ object AutopilotNativeBridge {
   )
 
   external fun nativeTriggerAction(handle: Long, actionFlag: Int)
+
+  external fun nativeSetLatchedAction(handle: Long, actionFlag: Int, enabled: Boolean)
+
+  external fun nativeRequestKeyframe(handle: Long)
 
   external fun nativeClearActions(handle: Long)
 

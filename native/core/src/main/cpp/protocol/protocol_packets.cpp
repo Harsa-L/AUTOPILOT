@@ -28,6 +28,8 @@ static uint8_t map_common_flags(const StickState& state) {
   if (state.action_flags & ActionFlag::CALIBRATE_GYRO) flags |= 0x08;
   if (state.action_flags & ActionFlag::HEADLESS) flags |= 0x10;
   if (state.action_flags & ActionFlag::MOTOR_STOP) flags |= 0x20;
+  if (state.action_flags & ActionFlag::FLIP_360) flags |= 0x40;
+  if (state.action_flags & ActionFlag::UNLOCK_MOTORS) flags |= 0x80;
   return flags;
 }
 
@@ -37,6 +39,8 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
   const uint8_t throttle = float_to_u8_axis(state.throttle);
   const uint8_t yaw = float_to_u8_axis(state.yaw);
   const uint8_t flags = map_common_flags(state);
+  const uint8_t effective_speed =
+      (state.action_flags & ActionFlag::FAST_FLY) ? 2 : static_cast<uint8_t>(state.speed_tier & 0x03);
 
   switch (family) {
     case Family::S2X: {
@@ -51,15 +55,15 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
       pkt[4] = throttle;
       pkt[5] = yaw;
       pkt[6] = flags;
-      pkt[7] = static_cast<uint8_t>(state.speed_tier & 0x03);
-      pkt[8] = 0x00;
+      pkt[7] = effective_speed;
+      pkt[8] = (state.action_flags & ActionFlag::FAST_FLY) ? 0x01 : 0x00;
       pkt[9] = xor_checksum(&pkt[2], 7);
       pkt[10] = 0x99;
       return pkt;
     }
 
     case Family::WIFI_UAV: {
-      // WiFi UAV (V88/D16) 8-byte UDP flight frame on port 8800:
+      // WiFi UAV (V88/V66/D16/GT3) 8-byte UDP flight frame on port 8800:
       // [0]=0x66 [1]=roll [2]=pitch [3]=throttle [4]=yaw [5]=flags [6]=xor(1..5) [7]=0x99
       std::vector<uint8_t> pkt(8, 0);
       pkt[0] = 0x66;
@@ -89,7 +93,8 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
     }
 
     case Family::COOINGDV_JIELI: {
-      // Jieli CTP framed payload: "CTP:" + topic + length + 8-byte axis payload
+      // Jieli CTP framed payload over TCP port 3333:
+      // "CTP:" + topic(0x00) + len(0x08) + 8-byte flight payload
       std::vector<uint8_t> pkt(14, 0);
       pkt[0] = 'C';
       pkt[1] = 'T';
@@ -133,7 +138,7 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
       pkt[3] = throttle;
       pkt[4] = yaw;
       pkt[5] = flags;
-      pkt[6] = static_cast<uint8_t>(state.speed_tier & 0x03);
+      pkt[6] = effective_speed;
       pkt[7] = static_cast<uint8_t>(state.camera_tilt);
       pkt[8] = xor_checksum(&pkt[1], 7);
       pkt[9] = 0x99;
@@ -150,7 +155,7 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
       pkt[4] = throttle;
       pkt[5] = yaw;
       pkt[6] = flags;
-      pkt[7] = static_cast<uint8_t>(state.speed_tier & 0x03);
+      pkt[7] = effective_speed;
       pkt[8] = xor_checksum(&pkt[2], 6);
       pkt[9] = 0x5A;
       return pkt;
@@ -170,6 +175,7 @@ std::vector<uint8_t> encode_handshake_packet(Family family) {
     case Family::COOINGDV:
       return {0x01, 0x01};
     case Family::COOINGDV_JIELI:
+      // Jieli CTP stream-open control topic
       return {'C', 'T', 'P', ':', 0x00, 0x02, 0x01, 0x01};
     case Family::WIFI_CAM:
       return {0x42, 0x76};
@@ -197,6 +203,50 @@ std::vector<uint8_t> encode_heartbeat_packet(Family family) {
       return {};
   }
   return {};
+}
+
+RxTelemetryUpdate parse_rx_telemetry(Family family, const uint8_t* data, size_t len) {
+  RxTelemetryUpdate out;
+  if (!data || len < 4) return out;
+
+  // Checksum-verified 8..12 byte telemetry ACK frame returned on control/heartbeat ports:
+  // [0]=0x66 [1]=type(0x01/0x81 status) ... [len-2]=xor(1..len-3) [len-1]=0x99
+  if (len >= 8 && len <= 16 && data[0] == 0x66 && data[len - 1] == 0x99) {
+    const uint8_t expected = xor_checksum(&data[1], len - 3);
+    if (expected == data[len - 2]) {
+      out.valid_status_flags = true;
+      out.status_flags = static_cast<int32_t>(data[1]);
+      // Protocols that return battery byte at index 3 (0..100%)
+      if (len >= 9 && (data[1] == 0x81 || data[1] == 0x02) && data[3] <= 100) {
+        out.valid_battery = true;
+        out.battery_percent = static_cast<int32_t>(data[3]);
+      }
+      return out;
+    }
+  }
+
+  // Jieli CTP textual status reply: "CTP:BAT:<percent>"
+  if (family == Family::COOINGDV_JIELI && len >= 10 &&
+      std::memcmp(data, "CTP:", 4) == 0) {
+    out.valid_status_flags = true;
+    out.status_flags = 0x01;
+    for (size_t i = 4; i + 4 < len; ++i) {
+      if (std::memcmp(data + i, "BAT:", 4) == 0 && data[i + 4] >= '0' && data[i + 4] <= '9') {
+        int val = 0;
+        size_t j = i + 4;
+        while (j < len && data[j] >= '0' && data[j] <= '9' && val <= 100) {
+          val = val * 10 + (data[j] - '0');
+          ++j;
+        }
+        if (val >= 0 && val <= 100) {
+          out.valid_battery = true;
+          out.battery_percent = val;
+        }
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 }  // namespace autopilot::protocol
