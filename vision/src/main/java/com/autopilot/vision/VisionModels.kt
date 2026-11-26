@@ -1,0 +1,69 @@
+package com.autopilot.vision
+
+import android.graphics.Bitmap
+import android.graphics.RectF
+
+sealed interface DetectorAvailability {
+  data class Ready(val acceleratorLabel: String, val modelLabel: String) : DetectorAvailability
+
+  data class ModelNotProvisioned(val guidance: String) : DetectorAvailability
+
+  data class Unavailable(val reason: String) : DetectorAvailability
+}
+
+data class VisionDetection(
+  val classId: Int,
+  val label: String,
+  val confidence: Float,
+  val boxNormalized: RectF,
+)
+
+data class OpticalFlowVector(
+  val normX: Float,
+  val normY: Float,
+  val dxNorm: Float,
+  val dyNorm: Float,
+  val confidence: Float,
+)
+
+data class TrackedTarget(
+  val trackId: Int,
+  val classId: Int,
+  val label: String,
+  val confidence: Float,
+  val boxNormalized: RectF,
+  val velocityXNorm: Float,
+  val velocityYNorm: Float,
+  val estimatedDistanceMeters: Float?,
+  val uncertaintyMeters: Float?,
+  val isDistanceCalibrated: Boolean,
+)
+
+data class CameraCalibrationConfig(
+  val focalLengthPx: Float = 520f,
+  val isCalibrated: Boolean = false,
+)
+
+data class VisionFrameResult(
+  val timestampMs: Long,
+  val detectorAvailability: DetectorAvailability,
+  val inferenceTimeMs: Float,
+  val globalFlowDxNorm: Float,
+  val globalFlowDyNorm: Float,
+  val flowVectors: List<OpticalFlowVector>,
+  val trackedTargets: List<TrackedTarget>,
+  val isSyntheticInput: Boolean,
+)
+
+/**
+ * Framework-independent inference interface.
+ * Concrete engines (LiteRT YOLO26n, ONNX Runtime, MediaPipe) implement this contract
+ * without leaking runtime types into the vision domain or UI.
+ */
+interface ObjectDetector : AutoCloseable {
+  val availability: DetectorAvailability
+
+  fun initialize(): DetectorAvailability
+
+  fun detect(bitmap: Bitmap, confidenceThreshold: Float = 0.35f): List<VisionDetection>
+}

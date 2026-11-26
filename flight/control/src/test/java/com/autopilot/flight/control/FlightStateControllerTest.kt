@@ -1,0 +1,92 @@
+package com.autopilot.flight.control
+
+import com.autopilot.drone.protocolapi.ConnectionConfig
+import com.autopilot.drone.protocolapi.ConnectionState
+import com.autopilot.drone.protocolapi.DroneCapabilities
+import com.autopilot.drone.protocolapi.DroneProtocol
+import com.autopilot.drone.protocolapi.DroneTelemetry
+import com.autopilot.drone.protocolapi.FlightCommand
+import com.autopilot.drone.protocolapi.ProtocolCompatibilityRegistry
+import com.autopilot.drone.protocolapi.ProtocolDescriptor
+import com.autopilot.drone.protocolapi.VideoFramePacket
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+private class FakeContractProtocol(
+  override val descriptor: ProtocolDescriptor,
+  override val capabilities: DroneCapabilities,
+) : DroneProtocol {
+  val recordedCommands = mutableListOf<FlightCommand>()
+  private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+  override val connectionState: StateFlow<ConnectionState> = _state
+
+  override suspend fun connect(config: ConnectionConfig) {
+    _state.value = ConnectionState.Connected(config.hostIp, 1L)
+  }
+
+  override suspend fun disconnect() {
+    _state.value = ConnectionState.Disconnected
+  }
+
+  override suspend fun sendCommand(command: FlightCommand) {
+    recordedCommands.add(command)
+  }
+
+  override fun telemetry(): Flow<DroneTelemetry> = emptyFlow()
+
+  override fun videoFrames(): Flow<VideoFramePacket> = emptyFlow()
+}
+
+class FlightStateControllerTest {
+
+  @Test
+  fun `input normalizer applies deadzone and max throttle cap`() {
+    val cfg = ControlSensitivityConfig(deadzone = 0.1f, expo = 0.0f, maxThrottleCap = 0.8f)
+    val zero = InputNormalizer.normalizeSticks(0.05f, -0.05f, 1.0f, 0.0f, cfg)
+    assertEquals(0f, zero.roll, 1e-4f)
+    assertEquals(0f, zero.pitch, 1e-4f)
+    assertEquals(0.8f, zero.throttle, 1e-4f)
+  }
+
+  @Test
+  fun `takeoff requires arming first and emergency stop is distinct from controlled land`() = runTest {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    val controller = FlightStateController(scope)
+    val entry = ProtocolCompatibilityRegistry.findById("s2x")!!
+    val fake = FakeContractProtocol(entry.descriptor, entry.capabilities)
+
+    controller.connectProtocol(fake, ConnectionConfig("192.168.0.1", 40000, 40000, null))
+    assertEquals(FlightState.Ready, controller.flightState.value)
+
+    // Takeoff rejected when not armed
+    assertFalse(controller.takeoff())
+
+    // Arm then takeoff succeeds
+    assertTrue(controller.arm())
+    assertEquals(FlightState.Armed, controller.flightState.value)
+    assertTrue(controller.takeoff())
+    assertTrue(fake.recordedCommands.contains(FlightCommand.Takeoff))
+
+    // Controlled land sends ControlledLand, NOT EmergencyStop
+    assertTrue(controller.controlledLand())
+    assertTrue(fake.recordedCommands.contains(FlightCommand.ControlledLand))
+    assertFalse(fake.recordedCommands.contains(FlightCommand.EmergencyStop))
+
+    // Emergency stop sends EmergencyStop and enters Emergency state
+    controller.emergencyStop()
+    assertEquals(FlightState.Emergency, controller.flightState.value)
+    assertTrue(fake.recordedCommands.contains(FlightCommand.EmergencyStop))
+
+    controller.disconnect()
+  }
+}

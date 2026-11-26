@@ -1,0 +1,28 @@
+plugins {
+  alias(libs.plugins.android.library)
+}
+
+android {
+  namespace = "com.autopilot.drone.protocols"
+  compileSdk { version = release(36) { minorApiLevel = 1 } }
+
+  defaultConfig {
+    minSdk = 26
+  }
+
+  compileOptions {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+  }
+}
+
+dependencies {
+  implementation(project(":core:common"))
+  implementation(project(":drone:protocol-api"))
+  implementation(project(":native:core"))
+  implementation(libs.androidx.core.ktx)
+  implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.kotlinx.coroutines.android)
+  testImplementation(libs.junit)
+  testImplementation(libs.kotlinx.coroutines.test)
+}

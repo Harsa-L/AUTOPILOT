@@ -1,0 +1,6 @@
+{
+  "name": "AUTOPILOT",
+  "description": "Native Android Wi-Fi drone flight-controller, telemetry, and computer-vision platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

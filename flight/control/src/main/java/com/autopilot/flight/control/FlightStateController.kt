@@ -1,0 +1,354 @@
+package com.autopilot.flight.control
+
+import com.autopilot.core.common.AutopilotLog
+import com.autopilot.core.common.SubsystemTag
+import com.autopilot.drone.protocolapi.ConnectionConfig
+import com.autopilot.drone.protocolapi.ConnectionState
+import com.autopilot.drone.protocolapi.DroneCapabilities
+import com.autopilot.drone.protocolapi.DroneProtocol
+import com.autopilot.drone.protocolapi.DroneTelemetry
+import com.autopilot.drone.protocolapi.FlightCommand
+import com.autopilot.drone.protocolapi.ProtocolDescriptor
+import kotlin.math.abs
+import kotlin.math.pow
+import kotlin.math.sign
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+
+/**
+ * Explicit safety-critical flight state machine.
+ */
+sealed interface FlightState {
+  data object Disconnected : FlightState
+
+  data object Discovering : FlightState
+
+  data object Connecting : FlightState
+
+  data object Connected : FlightState
+
+  data object Ready : FlightState
+
+  data object Armed : FlightState
+
+  data object TakingOff : FlightState
+
+  data object Flying : FlightState
+
+  data object Landing : FlightState
+
+  data object Emergency : FlightState
+
+  data class ConnectionLost(val reason: String) : FlightState
+
+  data class Fault(val reason: String) : FlightState
+
+  val label: String
+    get() =
+      when (this) {
+        Disconnected -> "DISCONNECTED"
+        Discovering -> "DISCOVERING"
+        Connecting -> "CONNECTING"
+        Connected -> "CONNECTED"
+        Ready -> "READY"
+        Armed -> "ARMED"
+        TakingOff -> "TAKING OFF"
+        Flying -> "FLYING"
+        Landing -> "LANDING"
+        Emergency -> "EMERGENCY STOP"
+        is ConnectionLost -> "LINK LOST"
+        is Fault -> "FAULT"
+      }
+}
+
+data class ControlSensitivityConfig(
+  val deadzone: Float = 0.06f,
+  val expo: Float = 0.35f,
+  val maxThrottleCap: Float = 0.85f,
+  val trimRoll: Float = 0f,
+  val trimPitch: Float = 0f,
+)
+
+object InputNormalizer {
+  fun normalizeAxis(raw: Float, deadzone: Float, expo: Float): Float {
+    val clamped = raw.coerceIn(-1f, 1f)
+    val mag = abs(clamped)
+    if (mag < deadzone) return 0f
+    val rescaled = ((mag - deadzone) / (1f - deadzone)).coerceIn(0f, 1f)
+    val curved = (1f - expo) * rescaled + expo * rescaled.pow(3)
+    return sign(clamped) * curved
+  }
+
+  fun normalizeSticks(
+    rawRoll: Float,
+    rawPitch: Float,
+    rawThrottle: Float,
+    rawYaw: Float,
+    config: ControlSensitivityConfig,
+  ): FlightCommand.StickAxes {
+    return FlightCommand.StickAxes(
+      roll = normalizeAxis(rawRoll, config.deadzone, config.expo),
+      pitch = normalizeAxis(rawPitch, config.deadzone, config.expo),
+      throttle =
+        (normalizeAxis(rawThrottle, config.deadzone, config.expo) * config.maxThrottleCap)
+          .coerceIn(-1f, 1f),
+      yaw = normalizeAxis(rawYaw, config.deadzone, config.expo),
+      trimRoll = config.trimRoll.coerceIn(-0.25f, 0.25f),
+      trimPitch = config.trimPitch.coerceIn(-0.25f, 0.25f),
+    )
+  }
+}
+
+/**
+ * Safety-critical flight state machine and command validator.
+ * Strictly separates ControlledLand, MotorStop, and EmergencyStop and refuses to
+ * issue unsupported commands or fabricate sensor states.
+ */
+class FlightStateController(private val scope: CoroutineScope) {
+
+  private val _flightState = MutableStateFlow<FlightState>(FlightState.Disconnected)
+  val flightState: StateFlow<FlightState> = _flightState.asStateFlow()
+
+  private val _telemetry = MutableStateFlow<DroneTelemetry?>(null)
+  val telemetry: StateFlow<DroneTelemetry?> = _telemetry.asStateFlow()
+
+  private val _safetyNotice = MutableStateFlow<String?>(null)
+  val safetyNotice: StateFlow<String?> = _safetyNotice.asStateFlow()
+
+  private val _sensitivity = MutableStateFlow(ControlSensitivityConfig())
+  val sensitivity: StateFlow<ControlSensitivityConfig> = _sensitivity.asStateFlow()
+
+  private var activeProtocol: DroneProtocol? = null
+  private var stateJob: Job? = null
+  private var telemetryJob: Job? = null
+  private var watchdogJob: Job? = null
+  private var lastRxSeenAtMs: Long = 0L
+
+  val currentDescriptor: ProtocolDescriptor?
+    get() = activeProtocol?.descriptor
+
+  val currentCapabilities: DroneCapabilities?
+    get() = activeProtocol?.capabilities
+
+  fun updateSensitivity(config: ControlSensitivityConfig) {
+    _sensitivity.value = config
+  }
+
+  fun markDiscovering() {
+    if (_flightState.value == FlightState.Disconnected) {
+      _flightState.value = FlightState.Discovering
+    }
+  }
+
+  suspend fun connectProtocol(protocol: DroneProtocol, config: ConnectionConfig) {
+    disconnect()
+    activeProtocol = protocol
+    _safetyNotice.value = null
+    _flightState.value = FlightState.Connecting
+
+    stateJob =
+      protocol.connectionState
+        .onEach { conn ->
+          when (conn) {
+            ConnectionState.Disconnected -> _flightState.value = FlightState.Disconnected
+            ConnectionState.Discovering -> _flightState.value = FlightState.Discovering
+            is ConnectionState.Connecting -> _flightState.value = FlightState.Connecting
+            is ConnectionState.Connected -> {
+              lastRxSeenAtMs = System.currentTimeMillis()
+              _flightState.value = FlightState.Ready
+            }
+            is ConnectionState.Reconnecting -> {
+              _safetyNotice.value = "Reconnecting (attempt ${conn.attempt}): ${conn.reason}"
+            }
+            is ConnectionState.ConnectionLost -> {
+              _flightState.value = FlightState.ConnectionLost(conn.reason)
+              _safetyNotice.value =
+                "Radio/Wi-Fi link lost: software cannot force recovery on unresponsive firmware."
+            }
+            is ConnectionState.Error -> {
+              _flightState.value = FlightState.Fault(conn.message)
+              _safetyNotice.value = conn.message
+            }
+          }
+        }
+        .launchIn(scope)
+
+    telemetryJob =
+      protocol.telemetry()
+        .onEach { t ->
+          _telemetry.value = t
+          if (t.packetsReceived > 0L) {
+            lastRxSeenAtMs = t.timestampMs
+          }
+        }
+        .launchIn(scope)
+
+    startWatchdog(protocol)
+    protocol.connect(config)
+  }
+
+  suspend fun disconnect() {
+    watchdogJob?.cancel()
+    stateJob?.cancel()
+    telemetryJob?.cancel()
+    activeProtocol?.let { proto ->
+      runCatching {
+        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+        proto.disconnect()
+      }
+    }
+    activeProtocol = null
+    _telemetry.value = null
+    _flightState.value = FlightState.Disconnected
+  }
+
+  fun arm(): Boolean {
+    val state = _flightState.value
+    if (state != FlightState.Ready && state != FlightState.Connected) {
+      _safetyNotice.value = "Cannot arm from state ${state.label}."
+      return false
+    }
+    _flightState.value = FlightState.Armed
+    _safetyNotice.value = "Motors armed. Verify clear airspace before takeoff."
+    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "FlightState -> ARMED")
+    return true
+  }
+
+  fun disarm() {
+    val state = _flightState.value
+    if (state == FlightState.Armed || state == FlightState.Emergency) {
+      _flightState.value = FlightState.Ready
+      _safetyNotice.value = null
+    }
+  }
+
+  suspend fun sendStickInput(roll: Float, pitch: Float, throttle: Float, yaw: Float) {
+    val proto = activeProtocol ?: return
+    val state = _flightState.value
+    if (state is FlightState.Emergency ||
+      state is FlightState.ConnectionLost ||
+      state is FlightState.Fault ||
+      state == FlightState.Disconnected
+    ) {
+      return
+    }
+    val normalized = InputNormalizer.normalizeSticks(roll, pitch, throttle, yaw, _sensitivity.value)
+    proto.sendCommand(normalized)
+  }
+
+  suspend fun takeoff(): Boolean {
+    val proto = activeProtocol ?: return false
+    if (!proto.capabilities.supportsTakeoff) {
+      _safetyNotice.value = "${proto.descriptor.displayName} does not support takeoff command."
+      return false
+    }
+    if (_flightState.value != FlightState.Armed) {
+      _safetyNotice.value = "Arm aircraft before commanding takeoff."
+      return false
+    }
+    _flightState.value = FlightState.TakingOff
+    proto.sendCommand(FlightCommand.Takeoff)
+    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded TAKEOFF on ${proto.descriptor.id}")
+    delay(600L)
+    if (_flightState.value == FlightState.TakingOff) {
+      _flightState.value = FlightState.Flying
+    }
+    return true
+  }
+
+  suspend fun controlledLand(): Boolean {
+    val proto = activeProtocol ?: return false
+    if (!proto.capabilities.supportsControlledLanding) {
+      _safetyNotice.value =
+        "${proto.descriptor.displayName} lacks verified controlled landing."
+      return false
+    }
+    _flightState.value = FlightState.Landing
+    proto.sendCommand(FlightCommand.ControlledLand)
+    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded CONTROLLED_LAND on ${proto.descriptor.id}")
+    delay(800L)
+    if (_flightState.value == FlightState.Landing) {
+      _flightState.value = FlightState.Ready
+    }
+    return true
+  }
+
+  suspend fun motorStop(): Boolean {
+    val proto = activeProtocol ?: return false
+    if (!proto.capabilities.supportsMotorStop) {
+      _safetyNotice.value = "${proto.descriptor.displayName} does not support MotorStop."
+      return false
+    }
+    proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+    proto.sendCommand(FlightCommand.MotorStop)
+    _flightState.value = FlightState.Ready
+    _safetyNotice.value = "Motor stop transmitted."
+    AutopilotLog.warn(SubsystemTag.FLIGHT_SAFETY, "Commanded MOTOR_STOP")
+    return true
+  }
+
+  suspend fun emergencyStop() {
+    val proto = activeProtocol
+    _flightState.value = FlightState.Emergency
+    _safetyNotice.value =
+      "EMERGENCY STOP TRIGGERED — Immediate motor cutoff sent; aircraft may free-fall."
+    AutopilotLog.error(SubsystemTag.FLIGHT_SAFETY, "EMERGENCY_STOP activated by operator")
+    if (proto != null && proto.capabilities.supportsEmergencyMotorStop) {
+      proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+      proto.sendCommand(FlightCommand.EmergencyStop)
+    }
+  }
+
+  suspend fun calibrateGyro() {
+    val proto = activeProtocol ?: return
+    if (!proto.capabilities.supportsGyroCalibration) {
+      _safetyNotice.value = "Gyro calibration unsupported by ${proto.descriptor.displayName}."
+      return
+    }
+    proto.sendCommand(FlightCommand.CalibrateGyro)
+    _safetyNotice.value = "Gyro calibration pulse sent (keep aircraft level)."
+  }
+
+  suspend fun setSpeedTier(tier: Int) {
+    val proto = activeProtocol ?: return
+    if (!proto.capabilities.supportsSpeedTiers) return
+    proto.sendCommand(FlightCommand.SetSpeedTier(tier))
+  }
+
+  suspend fun tiltCamera(delta: Int) {
+    val proto = activeProtocol ?: return
+    if (!proto.capabilities.supportsCameraTilt) return
+    proto.sendCommand(FlightCommand.CameraTilt(delta))
+  }
+
+  private fun startWatchdog(protocol: DroneProtocol) {
+    watchdogJob?.cancel()
+    watchdogJob =
+      scope.launch {
+        while (true) {
+          delay(500L)
+          val state = _flightState.value
+          if (state == FlightState.Flying || state == FlightState.Armed || state == FlightState.TakingOff) {
+            val age = System.currentTimeMillis() - lastRxSeenAtMs
+            // For real hardware sessions with inbound packets previously seen, warn after 4s silence.
+            if (!protocol.descriptor.isSyntheticHarness &&
+              (_telemetry.value?.packetsReceived ?: 0L) > 0L &&
+              age > 4000L
+            ) {
+              _flightState.value = FlightState.ConnectionLost("Telemetry timeout (${age}ms)")
+              _safetyNotice.value =
+                "Watchdog: no RX datagrams for ${age}ms. Controls centered; verify drone link."
+              protocol.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+            }
+          }
+        }
+      }
+  }
+}
