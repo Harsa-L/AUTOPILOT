@@ -160,10 +160,19 @@ class NativeDroneProtocolAdapter(
         }
       }
       is FlightCommand.SetSpeedTier -> {
-        speedTier = command.tier.coerceIn(0, 2)
+        if (capabilities.supportsSpeedTiers) {
+          speedTier = command.tier.coerceIn(0, 2)
+        }
+      }
+      is FlightCommand.SetHeadlessMode -> {
+        if (capabilities.supportsHeadlessMode && command.enabled) {
+          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.HEADLESS)
+        }
       }
       is FlightCommand.CameraTilt -> {
-        cameraTilt = command.delta.coerceIn(-1, 1)
+        if (capabilities.supportsCameraTilt) {
+          cameraTilt = command.delta.coerceIn(-1, 1)
+        }
       }
       FlightCommand.RequestKeyframe -> {
         // Handled by decoder/transport re-sync when supported.

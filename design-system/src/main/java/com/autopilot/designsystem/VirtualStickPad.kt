@@ -43,6 +43,7 @@ fun VirtualStickPad(
   modifier: Modifier = Modifier,
   size: Dp? = null,
   tag: String = "virtual_stick",
+  onTouchActiveChanged: (Boolean) -> Unit = {},
 ) {
   val theme = LocalResolvedTheme.current
   val padSize = size ?: theme.components.stickPadSize
@@ -55,7 +56,7 @@ fun VirtualStickPad(
   val ringColor = theme.colors.borderSubtle
   val crosshairColor = theme.colors.textSecondary.copy(alpha = 0.35f)
   val thumbColor = theme.colors.accent
-  val thumbGlow = theme.colors.accent.copy(alpha = 0.25f)
+  val thumbGlow = theme.colors.accent.copy(alpha = 0.22f)
 
   Column(
     modifier = modifier,
@@ -71,17 +72,20 @@ fun VirtualStickPad(
           .pointerInput(autoCenterY) {
             detectDragGestures(
               onDragStart = {
+                onTouchActiveChanged(true)
                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
               },
               onDragEnd = {
                 normX = 0f
                 if (autoCenterY) normY = 0f
                 onAxesChanged(normX, normY)
+                onTouchActiveChanged(false)
               },
               onDragCancel = {
                 normX = 0f
                 if (autoCenterY) normY = 0f
                 onAxesChanged(normX, normY)
+                onTouchActiveChanged(false)
               },
               onDrag = { change, dragAmount ->
                 change.consume()

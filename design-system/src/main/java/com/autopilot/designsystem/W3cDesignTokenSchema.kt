@@ -116,66 +116,66 @@ object BuiltInThemeDocuments {
   val minimalLight =
     W3cThemeDocument(
       id = "minimal_light",
-      name = "Minimalist Light Console",
+      name = "Daylight Slate",
       appearance = "light",
       tokens =
         mapOf(
-          "color.canvas" to W3cTokenLeaf("#F4F6F9", "color", "Primary viewport canvas"),
+          "color.canvas" to W3cTokenLeaf("#F5F7F9", "color", "Primary viewport canvas"),
           "color.surface" to W3cTokenLeaf("#FFFFFF", "color", "Elevated panel surface"),
-          "color.surfaceElevated" to W3cTokenLeaf("#EDF2F7", "color", "Subtle secondary surface"),
-          "color.surfaceGlass" to W3cTokenLeaf("#E0FFFFFF", "color", "HUD translucent overlay"),
-          "color.textPrimary" to W3cTokenLeaf("#0F172A", "color"),
-          "color.textSecondary" to W3cTokenLeaf("#475569", "color"),
-          "color.accent" to W3cTokenLeaf("#0284C7", "color"),
+          "color.surfaceElevated" to W3cTokenLeaf("#EAEFF4", "color", "Subtle secondary surface"),
+          "color.surfaceGlass" to W3cTokenLeaf("#E6FFFFFF", "color", "HUD translucent overlay"),
+          "color.textPrimary" to W3cTokenLeaf("#161D26", "color"),
+          "color.textSecondary" to W3cTokenLeaf("#5B6878", "color"),
+          "color.accent" to W3cTokenLeaf("#2D6884", "color"),
           "color.onAccent" to W3cTokenLeaf("#FFFFFF", "color"),
-          "color.borderSubtle" to W3cTokenLeaf("#CBD5E1", "color"),
-          "color.statusNominal" to W3cTokenLeaf("#059669", "color"),
-          "color.statusWarning" to W3cTokenLeaf("#D97706", "color"),
-          "color.statusEmergency" to W3cTokenLeaf("#DC2626", "color"),
-          "color.statusInfo" to W3cTokenLeaf("#0284C7", "color"),
-          "component.cardRadius" to W3cTokenLeaf("16dp", "dimension"),
-          "component.hudAlpha" to W3cTokenLeaf("0.84", "number"),
+          "color.borderSubtle" to W3cTokenLeaf("#D0D8E2", "color"),
+          "color.statusNominal" to W3cTokenLeaf("#2D6884", "color"),
+          "color.statusWarning" to W3cTokenLeaf("#A36B2C", "color"),
+          "color.statusEmergency" to W3cTokenLeaf("#B33A3A", "color"),
+          "color.statusInfo" to W3cTokenLeaf("#2D6884", "color"),
+          "component.cardRadius" to W3cTokenLeaf("14dp", "dimension"),
+          "component.hudAlpha" to W3cTokenLeaf("0.86", "number"),
         ),
     )
 
   val cockpitDark =
     W3cThemeDocument(
       id = "cockpit_dark",
-      name = "Obsidian Cockpit Dark",
+      name = "Night Cockpit",
       appearance = "dark",
       tokens =
         mapOf(
-          "color.canvas" to W3cTokenLeaf("#080C12", "color", "Deep night cockpit canvas"),
-          "color.surface" to W3cTokenLeaf("#101722", "color", "Primary telemetry card"),
-          "color.surfaceElevated" to W3cTokenLeaf("#172131", "color", "Nested control panel"),
-          "color.surfaceGlass" to W3cTokenLeaf("#CC0E1622", "color", "HUD translucent overlay"),
-          "color.textPrimary" to W3cTokenLeaf("#F1F5F9", "color"),
-          "color.textSecondary" to W3cTokenLeaf("#94A3B8", "color"),
-          "color.accent" to W3cTokenLeaf("#38BDF8", "color"),
-          "color.onAccent" to W3cTokenLeaf("#06131E", "color"),
-          "color.borderSubtle" to W3cTokenLeaf("#243247", "color"),
-          "color.statusNominal" to W3cTokenLeaf("#10B981", "color"),
-          "color.statusWarning" to W3cTokenLeaf("#F59E0B", "color"),
-          "color.statusEmergency" to W3cTokenLeaf("#EF4444", "color"),
-          "color.statusInfo" to W3cTokenLeaf("#38BDF8", "color"),
-          "component.cardRadius" to W3cTokenLeaf("16dp", "dimension"),
-          "component.hudAlpha" to W3cTokenLeaf("0.78", "number"),
+          "color.canvas" to W3cTokenLeaf("#0D1117", "color", "Deep night cockpit canvas"),
+          "color.surface" to W3cTokenLeaf("#141B24", "color", "Primary control surface"),
+          "color.surfaceElevated" to W3cTokenLeaf("#1B2430", "color", "Nested control panel"),
+          "color.surfaceGlass" to W3cTokenLeaf("#D9111821", "color", "HUD translucent overlay"),
+          "color.textPrimary" to W3cTokenLeaf("#E6EDF3", "color"),
+          "color.textSecondary" to W3cTokenLeaf("#8B98A9", "color"),
+          "color.accent" to W3cTokenLeaf("#5A93AE", "color"),
+          "color.onAccent" to W3cTokenLeaf("#0B141B", "color"),
+          "color.borderSubtle" to W3cTokenLeaf("#273244", "color"),
+          "color.statusNominal" to W3cTokenLeaf("#5A93AE", "color"),
+          "color.statusWarning" to W3cTokenLeaf("#C68B47", "color"),
+          "color.statusEmergency" to W3cTokenLeaf("#C45151", "color"),
+          "color.statusInfo" to W3cTokenLeaf("#5A93AE", "color"),
+          "component.cardRadius" to W3cTokenLeaf("14dp", "dimension"),
+          "component.hudAlpha" to W3cTokenLeaf("0.82", "number"),
         ),
     )
 
   val daylightHighContrast =
     W3cThemeDocument(
       id = "daylight_contrast",
-      name = "Daylight High-Contrast",
+      name = "High-Contrast Field",
       appearance = "light",
       extendsThemeId = "minimal_light",
       tokens =
         mapOf(
           "color.canvas" to W3cTokenLeaf("#FFFFFF", "color"),
-          "color.surface" to W3cTokenLeaf("#F8FAFC", "color"),
-          "color.textPrimary" to W3cTokenLeaf("#020617", "color"),
-          "color.accent" to W3cTokenLeaf("#0369A1", "color"),
-          "color.borderSubtle" to W3cTokenLeaf("#64748B", "color"),
+          "color.surface" to W3cTokenLeaf("#F6F8FA", "color"),
+          "color.textPrimary" to W3cTokenLeaf("#0D1117", "color"),
+          "color.accent" to W3cTokenLeaf("#22566F", "color"),
+          "color.borderSubtle" to W3cTokenLeaf("#6E7B8B", "color"),
           "component.hudAlpha" to W3cTokenLeaf("0.92", "number"),
         ),
     )
@@ -226,24 +226,24 @@ object ThemeCascadeResolver {
 
     val semanticColors =
       SemanticColorTokens(
-        canvas = colorOf("color.canvas", if (effectiveDark) Color(0xFF080C12) else Color(0xFFF4F6F9)),
-        surface = colorOf("color.surface", if (effectiveDark) Color(0xFF101722) else Color.White),
+        canvas = colorOf("color.canvas", if (effectiveDark) Color(0xFF0D1117) else Color(0xFFF5F7F9)),
+        surface = colorOf("color.surface", if (effectiveDark) Color(0xFF141B24) else Color.White),
         surfaceElevated =
-          colorOf("color.surfaceElevated", if (effectiveDark) Color(0xFF172131) else Color(0xFFEDF2F7)),
+          colorOf("color.surfaceElevated", if (effectiveDark) Color(0xFF1B2430) else Color(0xFFEAEFF4)),
         surfaceGlass =
-          colorOf("color.surfaceGlass", if (effectiveDark) Color(0xCC0E1622) else Color(0xE0FFFFFF)),
+          colorOf("color.surfaceGlass", if (effectiveDark) Color(0xD9111821) else Color(0xE6FFFFFF)),
         textPrimary =
-          colorOf("color.textPrimary", if (effectiveDark) Color(0xFFF1F5F9) else Color(0xFF0F172A)),
+          colorOf("color.textPrimary", if (effectiveDark) Color(0xFFE6EDF3) else Color(0xFF161D26)),
         textSecondary =
-          colorOf("color.textSecondary", if (effectiveDark) Color(0xFF94A3B8) else Color(0xFF475569)),
-        accent = colorOf("color.accent", if (effectiveDark) Color(0xFF38BDF8) else Color(0xFF0284C7)),
-        onAccent = colorOf("color.onAccent", if (effectiveDark) Color(0xFF06131E) else Color.White),
+          colorOf("color.textSecondary", if (effectiveDark) Color(0xFF8B98A9) else Color(0xFF5B6878)),
+        accent = colorOf("color.accent", if (effectiveDark) Color(0xFF5A93AE) else Color(0xFF2D6884)),
+        onAccent = colorOf("color.onAccent", if (effectiveDark) Color(0xFF0B141B) else Color.White),
         borderSubtle =
-          colorOf("color.borderSubtle", if (effectiveDark) Color(0xFF243247) else Color(0xFFCBD5E1)),
-        statusNominal = colorOf("color.statusNominal", Color(0xFF10B981)),
-        statusWarning = colorOf("color.statusWarning", Color(0xFFF59E0B)),
-        statusEmergency = colorOf("color.statusEmergency", Color(0xFFEF4444)),
-        statusInfo = colorOf("color.statusInfo", Color(0xFF38BDF8)),
+          colorOf("color.borderSubtle", if (effectiveDark) Color(0xFF273244) else Color(0xFFD0D8E2)),
+        statusNominal = colorOf("color.statusNominal", if (effectiveDark) Color(0xFF5A93AE) else Color(0xFF2D6884)),
+        statusWarning = colorOf("color.statusWarning", if (effectiveDark) Color(0xFFC68B47) else Color(0xFFA36B2C)),
+        statusEmergency = colorOf("color.statusEmergency", if (effectiveDark) Color(0xFFC45151) else Color(0xFFB33A3A)),
+        statusInfo = colorOf("color.statusInfo", if (effectiveDark) Color(0xFF5A93AE) else Color(0xFF2D6884)),
         isDark = effectiveDark,
       )
 

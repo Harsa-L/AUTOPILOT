@@ -46,6 +46,7 @@ class VisionPipelineCoordinator(
   private val frameQueue = Channel<Pair<Bitmap, Boolean>>(Channel.CONFLATED)
   private var workerJob: Job? = null
   private var nativeVisionHandle: Long = 0L
+  @Volatile private var confidenceThreshold: Float = 0.40f
 
   // Pre-allocated direct RGB24 buffer for 160x120 optical flow grid (no per-frame heap churn).
   private val flowWidth = 160
@@ -74,6 +75,10 @@ class VisionPipelineCoordinator(
 
   fun updateCalibration(focalLengthPx: Float, isCalibrated: Boolean) {
     _calibration.value = CameraCalibrationConfig(focalLengthPx, isCalibrated)
+  }
+
+  fun updateConfidenceThreshold(threshold: Float) {
+    confidenceThreshold = threshold.coerceIn(0.15f, 0.90f)
   }
 
   fun setEnabled(active: Boolean) {
@@ -113,7 +118,7 @@ class VisionPipelineCoordinator(
           val startNs = System.nanoTime()
           val detections =
             if (detector.availability is DetectorAvailability.Ready) {
-              detector.detect(frame)
+              detector.detect(frame, confidenceThreshold)
             } else {
               emptyList()
             }

@@ -6,14 +6,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.autopilot.core.common.AutopilotLog
 import com.autopilot.core.common.DefaultAutopilotDispatchers
-import com.autopilot.core.common.DiagnosticLogEntry
 import com.autopilot.core.common.SubsystemTag
 import com.autopilot.designsystem.ContextualEffects
 import com.autopilot.designsystem.ThemeAppearanceMode
 import com.autopilot.designsystem.ThemeManager
 import com.autopilot.designsystem.ThemeRuntimeState
-import com.autopilot.designsystem.ThemeSchemaValidator
-import com.autopilot.designsystem.ThemeValidationResult
 import com.autopilot.drone.protocolapi.ConnectionConfig
 import com.autopilot.drone.protocolapi.DroneCapabilities
 import com.autopilot.drone.protocolapi.DroneTelemetry
@@ -21,7 +18,6 @@ import com.autopilot.drone.protocolapi.ProtocolCompatibilityRegistry
 import com.autopilot.drone.protocolapi.ProtocolDescriptor
 import com.autopilot.drone.protocolapi.ProtocolRegistryEntry
 import com.autopilot.drone.protocols.NativeDroneProtocolAdapter
-import com.autopilot.drone.protocols.ProtocolPacketEncoder
 import com.autopilot.drone.protocols.WifiConnectivityController
 import com.autopilot.drone.protocols.WifiLinkSnapshot
 import com.autopilot.flight.control.ControlSensitivityConfig
@@ -30,16 +26,18 @@ import com.autopilot.flight.control.FlightStateController
 import com.autopilot.video.VideoPipelineController
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.DetectorAvailability
+import com.autopilot.vision.TrackedTarget
 import com.autopilot.vision.VisionFrameResult
 import com.autopilot.vision.VisionPipelineCoordinator
 import com.example.data.AutopilotDatabase
 import com.example.data.AutopilotRepository
 import com.example.data.AutopilotUserPrefs
-import com.example.data.CustomThemeEntity
 import com.example.data.DiagnosticTraceEntity
 import com.example.data.FlightSessionEntity
 import com.example.data.UserPreferencesStore
 import com.example.service.FlightLinkForegroundService
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -49,6 +47,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlin.math.hypot
 
 @Serializable
 data class TelemetryExportBundle(
@@ -77,10 +76,12 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   val telemetry: StateFlow<DroneTelemetry?> = flightController.telemetry
   val safetyNotice: StateFlow<String?> = flightController.safetyNotice
   val sensitivity: StateFlow<ControlSensitivityConfig> = flightController.sensitivity
+  val speedTier: StateFlow<Int> = flightController.speedTier
+  val headlessMode: StateFlow<Boolean> = flightController.headlessMode
+  val cameraTiltStep: StateFlow<Int> = flightController.cameraTiltStep
   val videoState: StateFlow<VideoStreamState> = videoPipeline.streamState
   val visionResult: StateFlow<VisionFrameResult?> = visionCoordinator.latestResult
   val detectorAvailability: StateFlow<DetectorAvailability> = visionCoordinator.availability
-  val liveLogs: StateFlow<List<DiagnosticLogEntry>> = AutopilotLog.entries
 
   val userPrefs: StateFlow<AutopilotUserPrefs> =
     prefsStore.preferences.stateIn(
@@ -103,18 +104,8 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       initialValue = emptyList(),
     )
 
-  val customThemes: StateFlow<List<CustomThemeEntity>> =
-    repository.customThemes.stateIn(
-      scope = viewModelScope,
-      started = SharingStarted.WhileSubscribed(5000),
-      initialValue = emptyList(),
-    )
-
   val productionProtocols: List<ProtocolRegistryEntry> =
     ProtocolCompatibilityRegistry.productionEntries()
-
-  val isolatedHarnessEntry: ProtocolRegistryEntry =
-    ProtocolCompatibilityRegistry.isolatedTestHarness
 
   private val _selectedEntry =
     MutableStateFlow(ProtocolCompatibilityRegistry.productionEntries().first())
@@ -126,15 +117,25 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   private val _visionOverlayEnabled = MutableStateFlow(false)
   val visionOverlayEnabled: StateFlow<Boolean> = _visionOverlayEnabled.asStateFlow()
 
-  private val _themeValidationFeedback = MutableStateFlow<ThemeValidationResult?>(null)
-  val themeValidationFeedback: StateFlow<ThemeValidationResult?> =
-    _themeValidationFeedback.asStateFlow()
+  private val _targetSelectionEnabled = MutableStateFlow(false)
+  val targetSelectionEnabled: StateFlow<Boolean> = _targetSelectionEnabled.asStateFlow()
+
+  private val _selectedTargetId = MutableStateFlow<Int?>(null)
+  val selectedTargetId: StateFlow<Int?> = _selectedTargetId.asStateFlow()
+
+  private val _targetActionConfig = MutableStateFlow(TargetActionConfig())
+  val targetActionConfig: StateFlow<TargetActionConfig> = _targetActionConfig.asStateFlow()
+
+  private val _activeTargetTask = MutableStateFlow<ActiveTargetTask?>(null)
+  val activeTargetTask: StateFlow<ActiveTargetTask?> = _activeTargetTask.asStateFlow()
 
   private var activeSessionRowId: Long? = null
   private var leftStickX = 0f
   private var leftStickY = -0.6f
   private var rightStickX = 0f
   private var rightStickY = 0f
+  private var manualStickActive = false
+  private var trackingLoopJob: Job? = null
 
   init {
     wifiController.refreshCurrentWifiState()
@@ -148,11 +149,19 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
           deadzone = prefs.stickDeadzone,
           expo = prefs.stickExpo,
           maxThrottleCap = prefs.maxThrottleCap,
+          trimRoll = prefs.stickTrimRoll,
+          trimPitch = prefs.stickTrimPitch,
         )
       )
       _visionOverlayEnabled.value = prefs.visionOverlayEnabled
       visionCoordinator.setEnabled(prefs.visionOverlayEnabled)
       visionCoordinator.updateCalibration(prefs.calibrationFocalLengthPx, prefs.calibrationVerified)
+      visionCoordinator.updateConfidenceThreshold(prefs.visionConfidenceThreshold)
+      _targetActionConfig.value =
+        _targetActionConfig.value.copy(
+          minTrackingDistanceMeters = prefs.visionDefaultMinDistanceM,
+          maxTrackingAuthority = prefs.visionTrackingAuthority,
+        )
       themeManager.selectTheme(prefs.activeThemeId)
       themeManager.setAppearanceMode(prefs.appearanceMode)
       themeManager.setContextualEffects(
@@ -160,25 +169,15 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       )
     }
 
-    viewModelScope.launch {
-      repository.customThemes.collect { savedThemes ->
-        savedThemes.forEach { entity ->
-          val res = ThemeSchemaValidator.parseAndValidate(entity.jsonPayload)
-          val doc = res.document
-          if (res.isValid && doc != null) {
-            themeManager.registerCustomTheme(doc, selectImmediately = false)
-          }
-        }
-      }
-    }
+    startVisionTrackingLoop()
   }
 
   fun selectProtocol(protocolId: String, persist: Boolean = true) {
     val entry =
-      ProtocolCompatibilityRegistry.findById(protocolId, includeSyntheticHarness = true) ?: return
+      ProtocolCompatibilityRegistry.findById(protocolId, includeSyntheticHarness = false) ?: return
     _selectedEntry.value = entry
     _customHostIp.value = entry.descriptor.defaultHostIp
-    if (persist && !entry.descriptor.isSyntheticHarness) {
+    if (persist) {
       viewModelScope.launch { prefsStore.updateSelectedProtocol(protocolId) }
     }
   }
@@ -201,20 +200,18 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
             protocolId = _selectedEntry.value.descriptor.id,
             subsystem = "CONNECTIVITY",
             severity = "INFO",
-            message = "Bound Wi-Fi AP network handle=$handle ($hint*)",
+            message = "Connected to aircraft Wi-Fi network ($hint*)",
           )
         }
       }
     }
   }
 
-  fun connectSelectedProtocol(useIsolatedSyntheticHarness: Boolean = false) {
-    val entry =
-      if (useIsolatedSyntheticHarness) isolatedHarnessEntry else _selectedEntry.value
-    _selectedEntry.value = entry
+  fun connectSelectedProtocol() {
+    val entry = _selectedEntry.value
     val desc = entry.descriptor
-    val host = if (useIsolatedSyntheticHarness) "127.0.0.1" else _customHostIp.value.trim()
-    val wifiHandle = if (useIsolatedSyntheticHarness) null else wifiLink.value.boundNetworkHandle
+    val host = _customHostIp.value.trim()
+    val wifiHandle = wifiLink.value.boundNetworkHandle
 
     val adapter = NativeDroneProtocolAdapter(entry, dispatchers)
     val config =
@@ -226,7 +223,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         rtspPath = desc.rtspPath,
         ssid = wifiLink.value.ssid,
         networkHandle = wifiHandle,
-        allowSyntheticHarness = useIsolatedSyntheticHarness,
+        allowSyntheticHarness = false,
       )
 
     viewModelScope.launch {
@@ -235,23 +232,18 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
           protocolId = desc.id,
           protocolName = desc.displayName,
           hostIp = config.hostIp,
-          isSyntheticHarness = useIsolatedSyntheticHarness,
+          isSyntheticHarness = false,
         )
       repository.recordTrace(
         protocolId = desc.id,
         subsystem = "PROTOCOL",
-        severity = if (useIsolatedSyntheticHarness) "WARN" else "INFO",
-        message =
-          if (useIsolatedSyntheticHarness) {
-            "Started ISOLATED SYNTHETIC TEST HARNESS (zero radio output)"
-          } else {
-            "Connecting ${desc.id} -> ${config.hostIp}:${config.controlPort}"
-          },
+        severity = "INFO",
+        message = "Connecting ${desc.displayName} (${config.hostIp}:${desc.controlPort})",
       )
       FlightLinkForegroundService.start(getApplication(), desc.displayName)
       flightController.connectProtocol(adapter, config)
       videoPipeline.attachToProtocol(adapter) { bitmap, isSynthetic ->
-        if (_visionOverlayEnabled.value) {
+        if (_visionOverlayEnabled.value || _targetSelectionEnabled.value) {
           visionCoordinator.submitFrame(bitmap, isSynthetic)
         }
       }
@@ -262,6 +254,8 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun disconnect() {
+    stopTargetAction()
+    clearSelectedTarget()
     viewModelScope.launch {
       val currentTelemetry = telemetry.value
       val currentVideo = (videoState.value as? VideoStreamState.ActiveFrame)?.metrics
@@ -283,6 +277,13 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       themeManager.setContextualEffects(
         themeManager.state.value.contextualEffects.copy(flightModeActive = false)
       )
+    }
+  }
+
+  fun onManualStickTouchChanged(active: Boolean) {
+    manualStickActive = active
+    if (active && _activeTargetTask.value != null && _activeTargetTask.value?.action != TargetActionType.TRACK_TARGET) {
+      stopTargetAction()
     }
   }
 
@@ -314,6 +315,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun disarmAircraft() {
+    stopTargetAction()
     flightController.disarm()
   }
 
@@ -322,22 +324,24 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun commandControlledLand() {
+    stopTargetAction()
     viewModelScope.launch { flightController.controlledLand() }
   }
 
   fun commandMotorStop() {
+    stopTargetAction()
     viewModelScope.launch { flightController.motorStop() }
   }
 
   fun commandEmergencyStop() {
+    stopTargetAction()
     viewModelScope.launch {
       flightController.emergencyStop()
       repository.recordTrace(
         protocolId = _selectedEntry.value.descriptor.id,
         subsystem = "FLIGHT_SAFETY",
         severity = "ERROR",
-        message = "Operator activated EMERGENCY_STOP",
-        packetHex = telemetry.value?.lastCommandHex,
+        message = "Operator activated emergency stop",
       )
     }
   }
@@ -350,24 +354,54 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     viewModelScope.launch { flightController.setSpeedTier(tier) }
   }
 
+  fun setHeadlessMode(enabled: Boolean) {
+    viewModelScope.launch { flightController.setHeadlessMode(enabled) }
+  }
+
   fun tiltCamera(delta: Int) {
     viewModelScope.launch { flightController.tiltCamera(delta) }
   }
 
-  fun updateSensitivity(deadzone: Float, expo: Float, maxThrottleCap: Float) {
+  fun updateSensitivity(
+    deadzone: Float,
+    expo: Float,
+    maxThrottleCap: Float,
+    trimRoll: Float = sensitivity.value.trimRoll,
+    trimPitch: Float = sensitivity.value.trimPitch,
+  ) {
     val cfg =
       ControlSensitivityConfig(
         deadzone = deadzone,
         expo = expo,
         maxThrottleCap = maxThrottleCap,
+        trimRoll = trimRoll.coerceIn(-0.25f, 0.25f),
+        trimPitch = trimPitch.coerceIn(-0.25f, 0.25f),
       )
     flightController.updateSensitivity(cfg)
-    viewModelScope.launch { prefsStore.updateFlightControls(deadzone, expo, maxThrottleCap) }
+    viewModelScope.launch {
+      prefsStore.updateFlightControls(deadzone, expo, maxThrottleCap, cfg.trimRoll, cfg.trimPitch)
+    }
+  }
+
+  fun updateTrim(trimRoll: Float, trimPitch: Float) {
+    val current = sensitivity.value
+    updateSensitivity(
+      deadzone = current.deadzone,
+      expo = current.expo,
+      maxThrottleCap = current.maxThrottleCap,
+      trimRoll = trimRoll,
+      trimPitch = trimPitch,
+    )
   }
 
   fun toggleVisionOverlay(enabled: Boolean) {
     _visionOverlayEnabled.value = enabled
-    visionCoordinator.setEnabled(enabled)
+    if (!enabled) {
+      _targetSelectionEnabled.value = false
+      clearSelectedTarget()
+      stopTargetAction()
+    }
+    visionCoordinator.setEnabled(enabled || _targetSelectionEnabled.value)
     val prefs = userPrefs.value
     viewModelScope.launch {
       prefsStore.updateVisionSettings(
@@ -375,8 +409,139 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         preferGpu = prefs.preferGpuLiteRt,
         focalLengthPx = prefs.calibrationFocalLengthPx,
         calibrated = prefs.calibrationVerified,
+        confidenceThreshold = prefs.visionConfidenceThreshold,
+        defaultMinDistanceM = prefs.visionDefaultMinDistanceM,
+        trackingAuthority = prefs.visionTrackingAuthority,
       )
     }
+  }
+
+  fun toggleTargetSelection(enabled: Boolean) {
+    _targetSelectionEnabled.value = enabled
+    if (enabled && !_visionOverlayEnabled.value) {
+      _visionOverlayEnabled.value = true
+    }
+    if (!enabled) {
+      clearSelectedTarget()
+      stopTargetAction()
+    }
+    visionCoordinator.setEnabled(_visionOverlayEnabled.value || enabled)
+  }
+
+  fun selectTargetAtNormalizedPoint(normX: Float, normY: Float): TrackedTarget? {
+    val targets = visionResult.value?.trackedTargets.orEmpty()
+    if (targets.isEmpty()) {
+      _selectedTargetId.value = null
+      return null
+    }
+    val directHit =
+      targets.firstOrNull { target ->
+        val box = target.boxNormalized
+        normX in (box.left - 0.04f)..(box.right + 0.04f) &&
+          normY in (box.top - 0.04f)..(box.bottom + 0.04f)
+      }
+    val chosen =
+      directHit
+        ?: targets
+          .minByOrNull { target ->
+            hypot(target.boxNormalized.centerX() - normX, target.boxNormalized.centerY() - normY)
+          }
+          ?.takeIf { target ->
+            hypot(target.boxNormalized.centerX() - normX, target.boxNormalized.centerY() - normY) < 0.18f
+          }
+
+    _selectedTargetId.value = chosen?.trackId
+    return chosen
+  }
+
+  fun clearSelectedTarget() {
+    _selectedTargetId.value = null
+  }
+
+  fun updateTargetActionConfig(config: TargetActionConfig) {
+    _targetActionConfig.value = config
+    _activeTargetTask.value = _activeTargetTask.value?.copy(config = config)
+  }
+
+  fun startTargetAction(
+    target: TrackedTarget,
+    action: TargetActionType,
+    config: TargetActionConfig = _targetActionConfig.value,
+  ) {
+    val availability =
+      TargetActionEvaluator.evaluateActions(
+          descriptor = _selectedEntry.value.descriptor,
+          capabilities = _selectedEntry.value.capabilities,
+          flightState = flightState.value,
+        )
+        .firstOrNull { it.action == action }
+    if (availability == null || !availability.readyNow) {
+      return
+    }
+    _selectedTargetId.value = target.trackId
+    _targetActionConfig.value = config
+    val now = System.currentTimeMillis()
+    _activeTargetTask.value =
+      ActiveTargetTask(
+        targetId = target.trackId,
+        targetLabel = target.label,
+        action = action,
+        config = config,
+        startedAtMs = now,
+        lastSeenAtMs = now,
+      )
+    AutopilotLog.info(SubsystemTag.VISION, "Engaged ${action.title} on #${target.trackId} ${target.label}")
+  }
+
+  fun stopTargetAction() {
+    if (_activeTargetTask.value != null) {
+      _activeTargetTask.value = null
+      viewModelScope.launch {
+        flightController.sendStickInput(roll = 0f, pitch = 0f, throttle = leftStickY, yaw = 0f)
+      }
+    }
+  }
+
+  private fun startVisionTrackingLoop() {
+    trackingLoopJob?.cancel()
+    trackingLoopJob =
+      viewModelScope.launch {
+        while (true) {
+          delay(50L)
+          val task = _activeTargetTask.value ?: continue
+          if (manualStickActive) continue
+          val targets = visionResult.value?.trackedTargets.orEmpty()
+          val matched = targets.firstOrNull { it.trackId == task.targetId }
+          val now = System.currentTimeMillis()
+          if (matched != null) {
+            _activeTargetTask.value = task.copy(lastSeenAtMs = now)
+            if (task.action != TargetActionType.TRACK_TARGET && flightState.value == FlightState.Flying) {
+              val cmd =
+                TargetActionEvaluator.computeServoCommand(
+                  task = task,
+                  target = matched,
+                  capabilities = _selectedEntry.value.capabilities,
+                )
+              flightController.sendStickInput(
+                roll = cmd.roll,
+                pitch = cmd.pitch,
+                throttle = leftStickY,
+                yaw = cmd.yaw,
+              )
+              cmd.cameraTiltDelta?.let { delta ->
+                if (delta != 0) flightController.tiltCamera(delta)
+              }
+            }
+          } else {
+            val lostElapsedSec = (now - task.lastSeenAtMs) / 1000f
+            if (lostElapsedSec > task.config.lostTargetTimeoutSec) {
+              stopTargetAction()
+            } else if (task.action != TargetActionType.TRACK_TARGET && flightState.value == FlightState.Flying) {
+              flightController.sendStickInput(roll = 0f, pitch = 0f, throttle = leftStickY, yaw = 0f)
+            }
+          }
+        }
+      }
   }
 
   fun updateVisionCalibration(focalLengthPx: Float, verified: Boolean) {
@@ -388,6 +553,45 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         preferGpu = prefs.preferGpuLiteRt,
         focalLengthPx = focalLengthPx,
         calibrated = verified,
+        confidenceThreshold = prefs.visionConfidenceThreshold,
+        defaultMinDistanceM = prefs.visionDefaultMinDistanceM,
+        trackingAuthority = prefs.visionTrackingAuthority,
+      )
+    }
+  }
+
+  fun updateVisionConfidence(threshold: Float) {
+    visionCoordinator.updateConfidenceThreshold(threshold)
+    val prefs = userPrefs.value
+    viewModelScope.launch {
+      prefsStore.updateVisionSettings(
+        overlayEnabled = _visionOverlayEnabled.value,
+        preferGpu = prefs.preferGpuLiteRt,
+        focalLengthPx = prefs.calibrationFocalLengthPx,
+        calibrated = prefs.calibrationVerified,
+        confidenceThreshold = threshold,
+        defaultMinDistanceM = prefs.visionDefaultMinDistanceM,
+        trackingAuthority = prefs.visionTrackingAuthority,
+      )
+    }
+  }
+
+  fun updateVisionTrackingDefaults(minDistM: Float, authority: Float) {
+    _targetActionConfig.value =
+      _targetActionConfig.value.copy(
+        minTrackingDistanceMeters = minDistM,
+        maxTrackingAuthority = authority,
+      )
+    val prefs = userPrefs.value
+    viewModelScope.launch {
+      prefsStore.updateVisionSettings(
+        overlayEnabled = _visionOverlayEnabled.value,
+        preferGpu = prefs.preferGpuLiteRt,
+        focalLengthPx = prefs.calibrationFocalLengthPx,
+        calibrated = prefs.calibrationVerified,
+        confidenceThreshold = prefs.visionConfidenceThreshold,
+        defaultMinDistanceM = minDistM,
+        trackingAuthority = authority,
       )
     }
   }
@@ -399,9 +603,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
           protocolId = _selectedEntry.value.descriptor.id,
           subsystem = "VISION",
           severity = if (ok) "INFO" else "ERROR",
-          message =
-            if (ok) "Imported custom YOLO26n .tflite model into noBackupFilesDir"
-            else "Failed to import YOLO26n .tflite model",
+          message = if (ok) "Imported object detection model" else "Failed to import detection model",
         )
         onComplete(ok)
       }
@@ -427,52 +629,14 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     viewModelScope.launch { prefsStore.updateThermalBlurDegradation(degrade) }
   }
 
-  fun validateAndSaveCustomTheme(rawJson: String) {
-    val result = ThemeSchemaValidator.parseAndValidate(rawJson)
-    _themeValidationFeedback.value = result
-    val doc = result.document
-    if (result.isValid && doc != null) {
-      themeManager.registerCustomTheme(doc, selectImmediately = true)
-      val mode =
-        when (doc.appearance) {
-          "light" -> ThemeAppearanceMode.LIGHT
-          "dark" -> ThemeAppearanceMode.DARK
-          else -> ThemeAppearanceMode.SYSTEM
-        }
-      viewModelScope.launch {
-        repository.saveCustomTheme(
-          CustomThemeEntity(
-            id = doc.id,
-            name = doc.name,
-            appearance = doc.appearance,
-            jsonPayload = ThemeSchemaValidator.encode(doc),
-            updatedAtMs = System.currentTimeMillis(),
-          )
-        )
-        prefsStore.updateTheme(doc.id, mode)
-      }
-    }
-  }
-
-  fun previewPacketHex(
-    descriptor: ProtocolDescriptor,
-    roll: Float,
-    pitch: Float,
-    throttle: Float,
-    yaw: Float,
-  ): String {
-    val bytes =
-      ProtocolPacketEncoder.encodeControlPacket(
-        family = descriptor.family,
-        roll = roll,
-        pitch = pitch,
-        throttle = throttle,
-        yaw = yaw,
-      )
-    return com.autopilot.core.common.ByteFraming.toHexString(bytes)
-  }
-
   fun activeCapabilities(): DroneCapabilities = _selectedEntry.value.capabilities
+
+  fun availableTargetActions(): List<TargetActionAvailability> =
+    TargetActionEvaluator.evaluateActions(
+      descriptor = _selectedEntry.value.descriptor,
+      capabilities = _selectedEntry.value.capabilities,
+      flightState = flightState.value,
+    )
 
   fun exportTelemetryToUri(uri: Uri, onComplete: (Boolean) -> Unit) {
     viewModelScope.launch(dispatchers.io) {
@@ -500,6 +664,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   override fun onCleared() {
     super.onCleared()
+    trackingLoopJob?.cancel()
     videoPipeline.detach()
     visionCoordinator.close()
     wifiController.releaseBinding()

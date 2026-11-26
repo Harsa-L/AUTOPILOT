@@ -125,6 +125,15 @@ class FlightStateController(private val scope: CoroutineScope) {
   private val _sensitivity = MutableStateFlow(ControlSensitivityConfig())
   val sensitivity: StateFlow<ControlSensitivityConfig> = _sensitivity.asStateFlow()
 
+  private val _speedTier = MutableStateFlow(1)
+  val speedTier: StateFlow<Int> = _speedTier.asStateFlow()
+
+  private val _headlessMode = MutableStateFlow(false)
+  val headlessMode: StateFlow<Boolean> = _headlessMode.asStateFlow()
+
+  private val _cameraTiltStep = MutableStateFlow(0)
+  val cameraTiltStep: StateFlow<Int> = _cameraTiltStep.asStateFlow()
+
   private var activeProtocol: DroneProtocol? = null
   private var stateJob: Job? = null
   private var telemetryJob: Job? = null
@@ -206,6 +215,8 @@ class FlightStateController(private val scope: CoroutineScope) {
     }
     activeProtocol = null
     _telemetry.value = null
+    _headlessMode.value = false
+    _cameraTiltStep.value = 0
     _flightState.value = FlightState.Disconnected
   }
 
@@ -317,15 +328,26 @@ class FlightStateController(private val scope: CoroutineScope) {
   }
 
   suspend fun setSpeedTier(tier: Int) {
+    val clamped = tier.coerceIn(0, 2)
+    _speedTier.value = clamped
     val proto = activeProtocol ?: return
     if (!proto.capabilities.supportsSpeedTiers) return
-    proto.sendCommand(FlightCommand.SetSpeedTier(tier))
+    proto.sendCommand(FlightCommand.SetSpeedTier(clamped))
+  }
+
+  suspend fun setHeadlessMode(enabled: Boolean) {
+    val proto = activeProtocol
+    if (proto != null && !proto.capabilities.supportsHeadlessMode) return
+    _headlessMode.value = enabled
+    proto?.sendCommand(FlightCommand.SetHeadlessMode(enabled))
   }
 
   suspend fun tiltCamera(delta: Int) {
+    val clamped = delta.coerceIn(-1, 1)
+    _cameraTiltStep.value = clamped
     val proto = activeProtocol ?: return
     if (!proto.capabilities.supportsCameraTilt) return
-    proto.sendCommand(FlightCommand.CameraTilt(delta))
+    proto.sendCommand(FlightCommand.CameraTilt(clamped))
   }
 
   private fun startWatchdog(protocol: DroneProtocol) {

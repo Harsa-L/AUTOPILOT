@@ -125,6 +125,8 @@ sealed interface FlightCommand {
 
   data class SetSpeedTier(val tier: Int) : FlightCommand
 
+  data class SetHeadlessMode(val enabled: Boolean) : FlightCommand
+
   data class CameraTilt(val delta: Int) : FlightCommand
 
   data object RequestKeyframe : FlightCommand

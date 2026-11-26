@@ -40,7 +40,7 @@ data class ThemeRuntimeState(
     listOf(
       W3cThemeDocument(
         id = "system_adaptive",
-        name = "System Adaptive Console",
+        name = "System Adaptive",
         appearance = "system",
       )
     ) + BuiltInThemeDocuments.allPresets,

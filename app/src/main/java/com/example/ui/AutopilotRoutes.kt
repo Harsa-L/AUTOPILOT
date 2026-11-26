@@ -4,13 +4,17 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 sealed interface AutopilotRoute {
-  @Serializable data object Dashboard : AutopilotRoute
-
   @Serializable data object Flight : AutopilotRoute
 
-  @Serializable data object Diagnostics : AutopilotRoute
+  @Serializable data object Vision : AutopilotRoute
 
-  @Serializable data object VisionSettings : AutopilotRoute
+  @Serializable data object Settings : AutopilotRoute
 
-  @Serializable data object ThemeStudio : AutopilotRoute
+  @Serializable data object SettingsAircraft : AutopilotRoute
+
+  @Serializable data object SettingsFlightControls : AutopilotRoute
+
+  @Serializable data object SettingsAppearance : AutopilotRoute
+
+  @Serializable data object SettingsLogs : AutopilotRoute
 }
