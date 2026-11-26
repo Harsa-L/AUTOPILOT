@@ -23,6 +23,8 @@ struct SessionConfig {
   int32_t control_rate_hz = 25;
   int64_t network_handle = 0;
   bool allow_synthetic_harness = false;
+  bool rtsp_allow_udp_fallback = true;
+  bool rtsp_prefer_udp = false;
 };
 
 struct SessionSnapshot {
@@ -53,6 +55,7 @@ class NativeSession {
   void update_sticks(float roll, float pitch, float throttle, float yaw, float trim_roll,
                      float trim_pitch, uint8_t speed_tier, int8_t camera_tilt);
   void trigger_action(uint32_t action_flag_bit);
+  void trigger_flip(int32_t direction);
   void set_latched_action(uint32_t action_flag_bit, bool enabled);
   void clear_actions();
   void request_keyframe();
@@ -82,6 +85,7 @@ class NativeSession {
   void parse_rtsp_text_and_interleaved();
   void send_rtsp_request(const std::string& method, const std::string& uri,
                          const std::string& extra_headers);
+  bool ensure_rtsp_udp_socket();
 
   SessionConfig config_;
   video::VideoReassembler reassembler_;
@@ -97,8 +101,12 @@ class NativeSession {
   int video_fd_ = -1;
   int heartbeat_fd_ = -1;
 
-  // RTSP client state for RTSP_H264 / RTSP_H265
+  // RTSP client state for RTSP_H264 / RTSP_H265 (TCP interleaved + UDP 461 fallback)
   int rtsp_fd_ = -1;
+  int rtsp_rtp_udp_fd_ = -1;
+  int rtsp_udp_client_port_ = 40010;
+  bool rtsp_using_udp_ = false;
+  bool rtsp_udp_fallback_attempted_ = false;
   RtspStage rtsp_stage_ = RtspStage::IDLE;
   bool rtsp_is_hevc_ = false;
   int rtsp_cseq_ = 1;
@@ -119,6 +127,9 @@ class NativeSession {
   };
   PulseEntry active_pulses_[6]{};
   int tilt_ticks_remaining_ = 0;
+  int flip_burst_ticks_ = 0;
+  float flip_roll_override_ = 0.0f;
+  float flip_pitch_override_ = 0.0f;
   std::atomic<bool> keyframe_requested_{false};
 
   std::atomic<uint64_t> packets_sent_{0};

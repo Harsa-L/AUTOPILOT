@@ -3,6 +3,11 @@ package com.autopilot.video
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Matrix
+import android.graphics.Paint
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import com.autopilot.core.common.AutopilotDispatchers
@@ -56,9 +61,22 @@ data class VideoCaptureState(
   val lastNotice: String? = null,
 )
 
+enum class MvFilterPreset(val label: String) {
+  NATURAL("Natural"),
+  WARM_FPV("Warm FPV"),
+  HIGH_CONTRAST("Vivid"),
+  MONOCHROME("Mono"),
+}
+
+data class VideoFrameTransform(
+  val rotationDeg: Int = 0,
+  val mirrorHorizontal: Boolean = false,
+  val mvFilter: MvFilterPreset = MvFilterPreset.NATURAL,
+)
+
 /**
  * Independent low-latency video decoding, snapshot, and MP4 recording controller.
- * Keeps transport, hardware MediaCodec decoding, and capture decoupled from UI and vision.
+ * Keeps transport, hardware MediaCodec decoding, transforms, and capture decoupled from UI and vision.
  */
 class VideoPipelineController(
   private val scope: CoroutineScope,
@@ -70,6 +88,9 @@ class VideoPipelineController(
   private val _captureState = MutableStateFlow(VideoCaptureState())
   val captureState: StateFlow<VideoCaptureState> = _captureState.asStateFlow()
 
+  @Volatile
+  private var frameTransform: VideoFrameTransform = VideoFrameTransform()
+
   private var streamJob: Job? = null
   private var annexBDecoder: AnnexBVideoDecoder? = null
   private var activeRecorder: Mp4FrameRecorder? = null
@@ -79,6 +100,11 @@ class VideoPipelineController(
   private var framesInWindow = 0
   private var currentFps = 0f
   private var totalDecoded = 0L
+
+  fun updateFrameTransform(transform: VideoFrameTransform) {
+    frameTransform =
+      transform.copy(rotationDeg = ((transform.rotationDeg % 360) + 360) % 360)
+  }
 
   fun queryHardwareDecoderSupport(transport: VideoTransportType): String {
     val mime =
@@ -145,7 +171,8 @@ class VideoPipelineController(
       protocol.videoFrames()
         .onEach { packet ->
           val startNs = System.nanoTime()
-          val bitmap = decodePacket(packet)
+          val rawBitmap = decodePacket(packet)
+          val bitmap = rawBitmap?.let { applyVideoTransform(it, frameTransform) }
           if (bitmap != null) {
             val decodeMs = (System.nanoTime() - startNs) / 1_000_000f
             totalDecoded++
@@ -317,5 +344,72 @@ class VideoPipelineController(
       reusablePixels[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
     }
     return Bitmap.createBitmap(reusablePixels, width, height, Bitmap.Config.ARGB_8888)
+  }
+
+  companion object {
+    fun applyVideoTransform(src: Bitmap, transform: VideoFrameTransform): Bitmap {
+      val rot = ((transform.rotationDeg % 360) + 360) % 360
+      if (rot == 0 && !transform.mirrorHorizontal && transform.mvFilter == MvFilterPreset.NATURAL) {
+        return src
+      }
+      val w = src.width
+      val h = src.height
+      if (w <= 0 || h <= 0) return src
+      val swapDims = rot == 90 || rot == 270
+      val outW = if (swapDims) h else w
+      val outH = if (swapDims) w else h
+
+      val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+      val canvas = Canvas(out)
+      val matrix = Matrix()
+      matrix.postTranslate(-w / 2f, -h / 2f)
+      if (transform.mirrorHorizontal) {
+        matrix.postScale(-1f, 1f)
+      }
+      if (rot != 0) {
+        matrix.postRotate(rot.toFloat())
+      }
+      matrix.postTranslate(outW / 2f, outH / 2f)
+
+      val paint =
+        when (transform.mvFilter) {
+          MvFilterPreset.NATURAL -> null
+          MvFilterPreset.MONOCHROME ->
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              val cm = ColorMatrix().apply { setSaturation(0f) }
+              colorFilter = ColorMatrixColorFilter(cm)
+            }
+          MvFilterPreset.HIGH_CONTRAST ->
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              val sat = ColorMatrix().apply { setSaturation(1.30f) }
+              val contrast =
+                ColorMatrix(
+                  floatArrayOf(
+                    1.18f, 0f, 0f, 0f, -18f,
+                    0f, 1.18f, 0f, 0f, -18f,
+                    0f, 0f, 1.18f, 0f, -18f,
+                    0f, 0f, 0f, 1f, 0f,
+                  )
+                )
+              sat.postConcat(contrast)
+              colorFilter = ColorMatrixColorFilter(sat)
+            }
+          MvFilterPreset.WARM_FPV ->
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+              val warm =
+                ColorMatrix(
+                  floatArrayOf(
+                    1.12f, 0.04f, 0f, 0f, 6f,
+                    0f, 1.02f, 0f, 0f, 2f,
+                    0f, 0f, 0.88f, 0f, -4f,
+                    0f, 0f, 0f, 1f, 0f,
+                  )
+                )
+              colorFilter = ColorMatrixColorFilter(warm)
+            }
+        }
+      canvas.drawBitmap(src, matrix, paint)
+      return out
+    }
   }
 }

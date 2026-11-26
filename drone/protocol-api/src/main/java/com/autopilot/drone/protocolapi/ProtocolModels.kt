@@ -36,6 +36,15 @@ enum class TerminationSemantics {
 }
 
 @Serializable
+enum class FlipDirection(val wireId: Int, val label: String) {
+  DEFAULT(0, "Flip"),
+  FORWARD(1, "Fwd"),
+  BACKWARD(2, "Back"),
+  LEFT(3, "Left"),
+  RIGHT(4, "Right"),
+}
+
+@Serializable
 data class DroneCapabilities(
   val supportsTakeoff: Boolean,
   val supportsControlledLanding: Boolean,
@@ -57,6 +66,7 @@ data class DroneCapabilities(
   val supportsUnlockCommand: Boolean = false,
   val supportsFastFly: Boolean = false,
   val supportsVideoRecording: Boolean = false,
+  val supportsFirmwareSdCapture: Boolean = false,
   val supportedVideoModes: List<VideoTransportType> = emptyList(),
 )
 
@@ -81,7 +91,23 @@ data class ProtocolDescriptor(
   val provenanceNote: String,
   val isSyntheticHarness: Boolean = false,
   val alternateHostIps: List<String> = emptyList(),
-)
+) {
+  fun resolvedVideoPort(transport: VideoTransportType, customPort: Int = 0): Int {
+    if (customPort in 1..65535) return customPort
+    if (family == ProtocolFamily.X69_LG && transport == VideoTransportType.RAW_UDP_JPEG) {
+      return 7080
+    }
+    if (family == ProtocolFamily.X69_LG &&
+      (transport == VideoTransportType.RTSP_H265 || transport == VideoTransportType.RTSP_H264)
+    ) {
+      return 554
+    }
+    return videoPort
+  }
+
+  fun resolvedRtspPath(customPath: String = ""): String? =
+    customPath.trim().takeIf { it.isNotEmpty() } ?: rtspPath
+}
 
 data class ConnectionConfig(
   val hostIp: String,
@@ -93,6 +119,8 @@ data class ConnectionConfig(
   val networkHandle: Long? = null,
   val allowSyntheticHarness: Boolean = false,
   val videoTransportOverride: VideoTransportType? = null,
+  val rtspAllowUdpFallback: Boolean = true,
+  val preferRtspUdp: Boolean = false,
 )
 
 sealed interface ConnectionState {
@@ -142,6 +170,10 @@ sealed interface FlightCommand {
   data object UnlockMotors : FlightCommand
 
   data class SetFastFly(val enabled: Boolean) : FlightCommand
+
+  data object TriggerFirmwarePhoto : FlightCommand
+
+  data class TriggerFirmwareRecord(val active: Boolean) : FlightCommand
 
   data object RequestKeyframe : FlightCommand
 }

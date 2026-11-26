@@ -24,7 +24,8 @@ JNIEXPORT jlong JNICALL
 Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeCreateSession(
     JNIEnv* env, jobject /* thiz */, jint family_wire_id, jint transport_kind, jstring host_ip,
     jint control_port, jint video_port, jint heartbeat_port, jstring rtsp_path,
-    jint control_rate_hz, jlong network_handle, jboolean allow_synthetic_harness) {
+    jint control_rate_hz, jlong network_handle, jboolean allow_synthetic_harness,
+    jboolean rtsp_allow_udp_fallback, jboolean rtsp_prefer_udp) {
   autopilot::comm::SessionConfig cfg;
   cfg.family = static_cast<autopilot::protocol::Family>(family_wire_id);
   cfg.video_transport = static_cast<autopilot::video::TransportKind>(transport_kind);
@@ -36,6 +37,8 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeCreateSession(
   cfg.control_rate_hz = control_rate_hz;
   cfg.network_handle = network_handle;
   cfg.allow_synthetic_harness = (allow_synthetic_harness == JNI_TRUE);
+  cfg.rtsp_allow_udp_fallback = (rtsp_allow_udp_fallback == JNI_TRUE);
+  cfg.rtsp_prefer_udp = (rtsp_prefer_udp == JNI_TRUE);
 
   auto* session = new autopilot::comm::NativeSession(cfg);
   return reinterpret_cast<jlong>(session);
@@ -85,6 +88,15 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeTriggerAction(JNIEnv* 
   auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
   if (!session) return;
   session->trigger_action(static_cast<uint32_t>(action_flag));
+}
+
+JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeTriggerFlip(JNIEnv* /* env */,
+                                                                      jobject /* thiz */,
+                                                                      jlong handle,
+                                                                      jint direction) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (session) session->trigger_flip(direction);
 }
 
 JNIEXPORT void JNICALL

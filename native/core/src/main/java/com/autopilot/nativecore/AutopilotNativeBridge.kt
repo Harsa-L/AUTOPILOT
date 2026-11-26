@@ -14,6 +14,8 @@ object NativeActionFlags {
   const val FLIP_360 = 1 shl 6
   const val UNLOCK_MOTORS = 1 shl 7
   const val FAST_FLY = 1 shl 8
+  const val SD_CAPTURE_PULSE = 1 shl 9
+  const val SD_RECORD_LATCH = 1 shl 10
 }
 
 data class NativeSessionCounters(
@@ -125,6 +127,8 @@ object AutopilotNativeBridge {
     controlRateHz: Int,
     networkHandle: Long,
     allowSyntheticHarness: Boolean,
+    rtspAllowUdpFallback: Boolean = true,
+    rtspPreferUdp: Boolean = false,
   ): Long
 
   external fun nativeStartSession(handle: Long): Boolean
@@ -146,6 +150,8 @@ object AutopilotNativeBridge {
   )
 
   external fun nativeTriggerAction(handle: Long, actionFlag: Int)
+
+  external fun nativeTriggerFlip(handle: Long, direction: Int)
 
   external fun nativeSetLatchedAction(handle: Long, actionFlag: Int, enabled: Boolean)
 

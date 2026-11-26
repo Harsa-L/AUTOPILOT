@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -32,9 +33,11 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Flight
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -50,13 +53,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -68,6 +75,7 @@ import com.autopilot.designsystem.StatusBadge
 import com.autopilot.designsystem.StatusTone
 import com.autopilot.designsystem.ThemeAppearanceMode
 import com.autopilot.drone.protocolapi.VideoTransportType
+import com.autopilot.video.MvFilterPreset
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -164,7 +172,18 @@ fun SettingsAircraftScreen(
   val hostIp by viewModel.customHostIp.collectAsStateWithLifecycle()
   val videoOverride by viewModel.videoTransportOverride.collectAsStateWithLifecycle()
   val wifiLink by viewModel.wifiLink.collectAsStateWithLifecycle()
+  val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
   val detectedMatch = remember(wifiLink.ssid) { viewModel.detectedProtocolFromWifi() }
+  var rtspPathText by remember { mutableStateOf(prefs.customRtspPath) }
+  var videoPortText by remember {
+    mutableStateOf(if (prefs.customVideoPort > 0) prefs.customVideoPort.toString() else "")
+  }
+
+  LaunchedEffect(prefs.customRtspPath, prefs.customVideoPort) {
+    if (rtspPathText != prefs.customRtspPath) rtspPathText = prefs.customRtspPath
+    val expectedPortStr = if (prefs.customVideoPort > 0) prefs.customVideoPort.toString() else ""
+    if (videoPortText != expectedPortStr) videoPortText = expectedPortStr
+  }
 
   val requiredPermissions = remember {
     buildList {
@@ -300,6 +319,188 @@ fun SettingsAircraftScreen(
               )
             }
           }
+          Spacer(Modifier.height(12.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text("Auto RTSP UDP Fallback", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Retries UDP RTP automatically when firmware rejects TCP interleaved (461)", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.rtspAutoFallback,
+              onCheckedChange = {
+                viewModel.updateLinkEndpointSettings(
+                  rtspAutoFallback = it,
+                  customRtspPath = rtspPathText,
+                  customVideoPort = videoPortText.toIntOrNull() ?: 0,
+                )
+              },
+              modifier = Modifier.testTag("rtsp_fallback_switch"),
+            )
+          }
+          Spacer(Modifier.height(8.dp))
+          OutlinedTextField(
+            value = rtspPathText,
+            onValueChange = { next ->
+              rtspPathText = next
+              viewModel.updateLinkEndpointSettings(
+                rtspAutoFallback = prefs.rtspAutoFallback,
+                customRtspPath = next,
+                customVideoPort = videoPortText.toIntOrNull() ?: 0,
+              )
+            },
+            label = { Text("Manual RTSP Path (Optional)") },
+            placeholder = { Text(desc.rtspPath ?: "/live/ch00_1") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("custom_rtsp_path_input"),
+          )
+          Spacer(Modifier.height(8.dp))
+          val autoResolvedPort = desc.resolvedVideoPort(videoOverride ?: desc.videoTransport)
+          OutlinedTextField(
+            value = videoPortText,
+            onValueChange = { next ->
+              val digits = next.filter { it.isDigit() }.take(5)
+              videoPortText = digits
+              viewModel.updateLinkEndpointSettings(
+                rtspAutoFallback = prefs.rtspAutoFallback,
+                customRtspPath = rtspPathText,
+                customVideoPort = digits.toIntOrNull() ?: 0,
+              )
+            },
+            label = { Text("Manual Video Port (Optional)") },
+            placeholder = { Text("Auto ($autoResolvedPort)") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("custom_video_port_input"),
+          )
+        }
+      }
+
+      item {
+        val caps = selectedEntry.capabilities
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Default.Videocam,
+              contentDescription = null,
+              tint = theme.colors.accent,
+              modifier = Modifier.size(20.dp),
+            )
+            Text(
+              text = "Camera Orientation, MV Filter & SD Capture",
+              style = MaterialTheme.typography.titleMedium,
+              color = theme.colors.textPrimary,
+            )
+          }
+          Spacer(Modifier.height(10.dp))
+          Text(
+            text = "Video Feed Rotation",
+            style = MaterialTheme.typography.labelMedium,
+            color = theme.colors.textSecondary,
+          )
+          Spacer(Modifier.height(4.dp))
+          FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(0, 90, 180, 270).forEach { deg ->
+              FilterChip(
+                selected = prefs.videoRotationDeg == deg,
+                onClick = {
+                  viewModel.updateVideoTransformSettings(
+                    rotationDeg = deg,
+                    mirrorHorizontal = prefs.videoMirrorHorizontal,
+                    mvFilterPreset = prefs.mvFilterPreset,
+                    firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                  )
+                },
+                label = { Text("${deg}°") },
+                modifier = Modifier.testTag("video_rot_$deg"),
+              )
+            }
+          }
+          Spacer(Modifier.height(8.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f)) {
+              Text("Horizontal Mirror", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Flip camera preview horizontally", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.videoMirrorHorizontal,
+              onCheckedChange = {
+                viewModel.updateVideoTransformSettings(
+                  rotationDeg = prefs.videoRotationDeg,
+                  mirrorHorizontal = it,
+                  mvFilterPreset = prefs.mvFilterPreset,
+                  firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                )
+              },
+              modifier = Modifier.testTag("video_mirror_switch"),
+            )
+          }
+          Spacer(Modifier.height(8.dp))
+          Text(
+            text = "MV Visual Filter",
+            style = MaterialTheme.typography.labelMedium,
+            color = theme.colors.textSecondary,
+          )
+          Spacer(Modifier.height(4.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            MvFilterPreset.entries.forEach { preset ->
+              FilterChip(
+                selected = prefs.mvFilterPreset == preset,
+                onClick = {
+                  viewModel.updateVideoTransformSettings(
+                    rotationDeg = prefs.videoRotationDeg,
+                    mirrorHorizontal = prefs.videoMirrorHorizontal,
+                    mvFilterPreset = preset,
+                    firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                  )
+                },
+                label = { Text(preset.label) },
+                modifier = Modifier.testTag("settings_mv_${preset.name.lowercase()}"),
+              )
+            }
+          }
+          Spacer(Modifier.height(8.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text("Firmware SD Capture Trigger", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text(
+                if (caps.supportsFirmwareSdCapture) "Also send wire photo/record trigger to aircraft SD slot"
+                else "Aircraft profile uses local MediaStore capture only",
+                style = MaterialTheme.typography.bodySmall,
+                color = theme.colors.textSecondary,
+              )
+            }
+            Switch(
+              checked = prefs.firmwareSdTriggerEnabled,
+              enabled = caps.supportsFirmwareSdCapture,
+              onCheckedChange = {
+                viewModel.updateVideoTransformSettings(
+                  rotationDeg = prefs.videoRotationDeg,
+                  mirrorHorizontal = prefs.videoMirrorHorizontal,
+                  mvFilterPreset = prefs.mvFilterPreset,
+                  firmwareSdTriggerEnabled = it,
+                )
+              },
+              modifier = Modifier.testTag("firmware_sd_trigger_switch"),
+            )
+          }
         }
       }
 
@@ -327,6 +528,7 @@ fun SettingsAircraftScreen(
             if (caps.supportsCameraTilt) StatusBadge("Camera Tilt", StatusTone.NOMINAL)
             if (caps.supportsPhotoCapture) StatusBadge("Snapshot", StatusTone.NOMINAL)
             if (caps.supportsVideoRecording) StatusBadge("MP4 Record", StatusTone.NOMINAL)
+            if (caps.supportsFirmwareSdCapture) StatusBadge("SD Trigger", StatusTone.NOMINAL)
             if (caps.supportsEmergencyMotorStop) StatusBadge("E-Stop", StatusTone.WARNING)
           }
         }
@@ -525,6 +727,109 @@ fun SettingsFlightControlsScreen(
           Spacer(Modifier.height(10.dp))
           Text(
             text = "Mode 2 Map · L-Stick: Throttle/Yaw · R-Stick: Roll/Pitch · A: Arm/Takeoff · B: Land · X: Flip · Y: Headless · L1/R1: Snap/Record · L2: Fast Fly · R2: Stop · L2+R2: E-STOP",
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.colors.textSecondary,
+          )
+        }
+      }
+
+      item {
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Default.Keyboard,
+              contentDescription = null,
+              tint = theme.colors.accent,
+              modifier = Modifier.size(20.dp),
+            )
+            Text(
+              text = "External Keyboard & KY UFO Assists",
+              style = MaterialTheme.typography.titleMedium,
+              color = theme.colors.textPrimary,
+            )
+          }
+          Spacer(Modifier.height(10.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text("External Keyboard Flight", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("WASD: Thr/Yaw · Arrows: Roll/Pitch · Space: Takeoff/Land · E: E-STOP", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.keyboardEnabled,
+              onCheckedChange = {
+                viewModel.updateAssistAndInputSettings(
+                  keyboardEnabled = it,
+                  softDescentAssistEnabled = prefs.softDescentAssistEnabled,
+                  gravityMaxAngleDeg = prefs.gravityMaxAngleDeg,
+                  spinnerSpeedRatio = prefs.spinnerSpeedRatio,
+                )
+              },
+              modifier = Modifier.testTag("keyboard_enable_switch"),
+            )
+          }
+          Spacer(Modifier.height(8.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text("One-Touch Soft Descent Assist", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Tapers throttle gently during Controlled Land", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.softDescentAssistEnabled,
+              onCheckedChange = {
+                viewModel.updateAssistAndInputSettings(
+                  keyboardEnabled = prefs.keyboardEnabled,
+                  softDescentAssistEnabled = it,
+                  gravityMaxAngleDeg = prefs.gravityMaxAngleDeg,
+                  spinnerSpeedRatio = prefs.spinnerSpeedRatio,
+                )
+              },
+              modifier = Modifier.testTag("soft_descent_switch"),
+            )
+          }
+          Spacer(Modifier.height(10.dp))
+          TuningSlider(
+            label = "Gravity Max Tilt Angle",
+            valueLabel = "${prefs.gravityMaxAngleDeg.toInt()}°",
+            value = prefs.gravityMaxAngleDeg,
+            range = 10f..45f,
+            onValueChange = {
+              viewModel.updateAssistAndInputSettings(
+                keyboardEnabled = prefs.keyboardEnabled,
+                softDescentAssistEnabled = prefs.softDescentAssistEnabled,
+                gravityMaxAngleDeg = it,
+                spinnerSpeedRatio = prefs.spinnerSpeedRatio,
+              )
+            },
+          )
+          TuningSlider(
+            label = "Spinner Maneuver Rate",
+            valueLabel = "${(prefs.spinnerSpeedRatio * 100).toInt()}%",
+            value = prefs.spinnerSpeedRatio,
+            range = 0.18f..0.75f,
+            onValueChange = {
+              viewModel.updateAssistAndInputSettings(
+                keyboardEnabled = prefs.keyboardEnabled,
+                softDescentAssistEnabled = prefs.softDescentAssistEnabled,
+                gravityMaxAngleDeg = prefs.gravityMaxAngleDeg,
+                spinnerSpeedRatio = it,
+              )
+            },
+          )
+          Spacer(Modifier.height(6.dp))
+          Text(
+            text = "Built-in Timed Macros (Launch via HUD Mode Sheet): " +
+              viewModel.builtInMacros.joinToString(" · ") { it.title },
             style = MaterialTheme.typography.bodySmall,
             color = theme.colors.textSecondary,
           )

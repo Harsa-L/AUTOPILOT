@@ -219,6 +219,13 @@ bool NativeSession::start() {
   rtsp_cseq_ = 1;
   rtsp_session_id_.clear();
   rtsp_control_url_.clear();
+  rtsp_using_udp_ = config_.rtsp_prefer_udp;
+  rtsp_udp_fallback_attempted_ = false;
+  rtsp_udp_client_port_ =
+      (config_.video_port >= 1024 && (config_.video_port % 2 == 0)) ? config_.video_port : 40010;
+  flip_burst_ticks_ = 0;
+  flip_roll_override_ = 0.0f;
+  flip_pitch_override_ = 0.0f;
   tcp_handshake_sent_ = false;
   control_tcp_connected_ = false;
 
@@ -297,6 +304,10 @@ void NativeSession::close_sockets() {
     ::close(rtsp_fd_);
     rtsp_fd_ = -1;
   }
+  if (rtsp_rtp_udp_fd_ >= 0) {
+    ::close(rtsp_rtp_udp_fd_);
+    rtsp_rtp_udp_fd_ = -1;
+  }
 }
 
 void NativeSession::stop() {
@@ -345,6 +356,30 @@ void NativeSession::trigger_action(uint32_t action_flag_bit) {
   active_pulses_[0] = PulseEntry{pulse_bits, 4};
 }
 
+void NativeSession::trigger_flip(int32_t direction) {
+  trigger_action(protocol::ActionFlag::FLIP_360);
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if (direction == 1) {
+    flip_roll_override_ = 0.0f;
+    flip_pitch_override_ = 0.85f;
+    flip_burst_ticks_ = 4;
+  } else if (direction == 2) {
+    flip_roll_override_ = 0.0f;
+    flip_pitch_override_ = -0.85f;
+    flip_burst_ticks_ = 4;
+  } else if (direction == 3) {
+    flip_roll_override_ = -0.85f;
+    flip_pitch_override_ = 0.0f;
+    flip_burst_ticks_ = 4;
+  } else if (direction == 4) {
+    flip_roll_override_ = 0.85f;
+    flip_pitch_override_ = 0.0f;
+    flip_burst_ticks_ = 4;
+  } else {
+    flip_burst_ticks_ = 0;
+  }
+}
+
 void NativeSession::set_latched_action(uint32_t action_flag_bit, bool enabled) {
   std::lock_guard<std::mutex> lock(state_mutex_);
   const uint32_t masked = action_flag_bit & protocol::ActionFlag::kLatchedMask;
@@ -362,6 +397,9 @@ void NativeSession::clear_actions() {
     slot = PulseEntry{};
   }
   tilt_ticks_remaining_ = 0;
+  flip_burst_ticks_ = 0;
+  flip_roll_override_ = 0.0f;
+  flip_pitch_override_ = 0.0f;
   stick_state_.camera_tilt = 0;
   stick_state_.action_flags = 0;
 }
@@ -436,6 +474,16 @@ void NativeSession::poll_jieli_tcp() {
       }
     }
   }
+}
+
+bool NativeSession::ensure_rtsp_udp_socket() {
+  if (rtsp_rtp_udp_fd_ >= 0) return true;
+  if (rtsp_udp_client_port_ == config_.video_port && video_fd_ >= 0) {
+    // Pick a dedicated even RTP port so we do not double-bind video_fd_
+    rtsp_udp_client_port_ = 40010;
+  }
+  rtsp_rtp_udp_fd_ = open_bound_udp_socket(config_.network_handle, true, rtsp_udp_client_port_);
+  return rtsp_rtp_udp_fd_ >= 0;
 }
 
 void NativeSession::send_rtsp_request(const std::string& method, const std::string& uri,
@@ -549,14 +597,51 @@ void NativeSession::parse_rtsp_text_and_interleaved() {
         }
       }
 
+      // Parse numeric RTSP status code (e.g. 200 OK, 461 Unsupported Transport)
+      int status_code = 200;
+      const size_t first_sp = headers.find(' ');
+      if (first_sp != std::string::npos) {
+        status_code = std::atoi(headers.c_str() + first_sp + 1);
+      }
+
+      if (rtsp_stage_ == RtspStage::SENT_SETUP && status_code == 461 &&
+          config_.rtsp_allow_udp_fallback && !rtsp_udp_fallback_attempted_) {
+        rtsp_udp_fallback_attempted_ = true;
+        rtsp_using_udp_ = true;
+        if (ensure_rtsp_udp_socket()) {
+          std::ostringstream tr;
+          tr << "Transport: RTP/AVP;unicast;client_port=" << rtsp_udp_client_port_ << "-"
+             << (rtsp_udp_client_port_ + 1) << "\r\n";
+          send_rtsp_request("SETUP", rtsp_control_url_.empty() ? rtsp_url_ : rtsp_control_url_,
+                            tr.str());
+          consumed += total_msg_len;
+          continue;
+        }
+      }
+
+      if (status_code >= 400) {
+        rtsp_stage_ = RtspStage::FAILED;
+        consumed += total_msg_len;
+        continue;
+      }
+
       // Advance RTSP state machine
       if (rtsp_stage_ == RtspStage::SENT_OPTIONS) {
         rtsp_stage_ = RtspStage::SENT_DESCRIBE;
         send_rtsp_request("DESCRIBE", rtsp_url_, "Accept: application/sdp\r\n");
       } else if (rtsp_stage_ == RtspStage::SENT_DESCRIBE) {
         rtsp_stage_ = RtspStage::SENT_SETUP;
-        send_rtsp_request("SETUP", rtsp_control_url_.empty() ? rtsp_url_ : rtsp_control_url_,
-                          "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n");
+        if (rtsp_using_udp_ && ensure_rtsp_udp_socket()) {
+          rtsp_udp_fallback_attempted_ = true;
+          std::ostringstream tr;
+          tr << "Transport: RTP/AVP;unicast;client_port=" << rtsp_udp_client_port_ << "-"
+             << (rtsp_udp_client_port_ + 1) << "\r\n";
+          send_rtsp_request("SETUP", rtsp_control_url_.empty() ? rtsp_url_ : rtsp_control_url_,
+                            tr.str());
+        } else {
+          send_rtsp_request("SETUP", rtsp_control_url_.empty() ? rtsp_url_ : rtsp_control_url_,
+                            "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n");
+        }
       } else if (rtsp_stage_ == RtspStage::SENT_SETUP) {
         rtsp_stage_ = RtspStage::SENT_PLAY;
         send_rtsp_request("PLAY", rtsp_url_, "Range: npt=0.000-\r\n");
@@ -692,6 +777,11 @@ void NativeSession::worker_loop() {
           stick_state_.camera_tilt = 0;
         }
       }
+      if (flip_burst_ticks_ > 0) {
+        current_state.roll = flip_roll_override_;
+        current_state.pitch = flip_pitch_override_;
+        --flip_burst_ticks_;
+      }
       current_state.action_flags = flags;
     }
 
@@ -746,7 +836,12 @@ void NativeSession::worker_loop() {
 
     // Poll available UDP RX datagrams without blocking control cadence.
     if (!is_harness) {
-      int fds_to_poll[3] = {control_is_tcp_ ? -1 : control_fd_, video_fd_, heartbeat_fd_};
+      int fds_to_poll[4] = {
+          control_is_tcp_ ? -1 : control_fd_,
+          video_fd_,
+          heartbeat_fd_,
+          rtsp_rtp_udp_fd_,
+      };
       for (int fd : fds_to_poll) {
         if (fd < 0) continue;
         for (int burst = 0; burst < 24; ++burst) {
@@ -758,6 +853,10 @@ void NativeSession::worker_loop() {
           packets_received_.fetch_add(1, std::memory_order_relaxed);
           last_rx_timestamp_ms_.store(now_ms(), std::memory_order_relaxed);
           connected_.store(true, std::memory_order_release);
+          if (fd == rtsp_rtp_udp_fd_) {
+            reassembler_.push_rtp_packet(rx_buf.data(), static_cast<size_t>(n), loop_us, rtsp_is_hevc_);
+            continue;
+          }
           if (fd != video_fd_) {
             const auto parsed =
                 protocol::parse_rx_telemetry(config_.family, rx_buf.data(), static_cast<size_t>(n));

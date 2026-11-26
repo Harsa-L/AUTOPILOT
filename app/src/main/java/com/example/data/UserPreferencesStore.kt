@@ -6,9 +6,11 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.autopilot.designsystem.ThemeAppearanceMode
+import com.autopilot.video.MvFilterPreset
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -34,8 +36,19 @@ data class AutopilotUserPrefs(
   val selectedProtocolId: String = "s2x",
   val selectedVideoTransport: String = "AUTO",
   val customHostIp: String = "",
+  val rtspAutoFallback: Boolean = true,
+  val customRtspPath: String = "",
+  val customVideoPort: Int = 0,
+  val videoRotationDeg: Int = 0,
+  val videoMirrorHorizontal: Boolean = false,
+  val mvFilterPreset: MvFilterPreset = MvFilterPreset.NATURAL,
+  val firmwareSdTriggerEnabled: Boolean = true,
+  val softDescentAssistEnabled: Boolean = false,
   val gamepadEnabled: Boolean = true,
   val gamepadThrottleHold: Boolean = false,
+  val keyboardEnabled: Boolean = true,
+  val gravityMaxAngleDeg: Float = 25f,
+  val spinnerSpeedRatio: Float = 0.42f,
 )
 
 class UserPreferencesStore(private val context: Context) {
@@ -59,8 +72,19 @@ class UserPreferencesStore(private val context: Context) {
     val SELECTED_PROTOCOL_ID = stringPreferencesKey("selected_protocol_id")
     val SELECTED_VIDEO_TRANSPORT = stringPreferencesKey("selected_video_transport")
     val CUSTOM_HOST_IP = stringPreferencesKey("custom_host_ip")
+    val RTSP_AUTO_FALLBACK = booleanPreferencesKey("rtsp_auto_fallback")
+    val CUSTOM_RTSP_PATH = stringPreferencesKey("custom_rtsp_path")
+    val CUSTOM_VIDEO_PORT = intPreferencesKey("custom_video_port")
+    val VIDEO_ROTATION_DEG = intPreferencesKey("video_rotation_deg")
+    val VIDEO_MIRROR_H = booleanPreferencesKey("video_mirror_horizontal")
+    val MV_FILTER_PRESET = stringPreferencesKey("mv_filter_preset")
+    val FIRMWARE_SD_TRIGGER = booleanPreferencesKey("firmware_sd_trigger")
+    val SOFT_DESCENT_ASSIST = booleanPreferencesKey("soft_descent_assist")
     val GAMEPAD_ENABLED = booleanPreferencesKey("gamepad_enabled")
     val GAMEPAD_THROTTLE_HOLD = booleanPreferencesKey("gamepad_throttle_hold")
+    val KEYBOARD_ENABLED = booleanPreferencesKey("keyboard_enabled")
+    val GRAVITY_MAX_ANGLE = floatPreferencesKey("gravity_max_angle_deg")
+    val SPINNER_SPEED_RATIO = floatPreferencesKey("spinner_speed_ratio")
   }
 
   val preferences: Flow<AutopilotUserPrefs> =
@@ -69,6 +93,9 @@ class UserPreferencesStore(private val context: Context) {
       val mode =
         runCatching { ThemeAppearanceMode.valueOf(modeName) }
           .getOrDefault(ThemeAppearanceMode.SYSTEM)
+      val mvName = prefs[Keys.MV_FILTER_PRESET] ?: MvFilterPreset.NATURAL.name
+      val mv =
+        runCatching { MvFilterPreset.valueOf(mvName) }.getOrDefault(MvFilterPreset.NATURAL)
       AutopilotUserPrefs(
         activeThemeId = prefs[Keys.ACTIVE_THEME_ID] ?: "system_adaptive",
         appearanceMode = mode,
@@ -88,8 +115,19 @@ class UserPreferencesStore(private val context: Context) {
         selectedProtocolId = prefs[Keys.SELECTED_PROTOCOL_ID] ?: "s2x",
         selectedVideoTransport = prefs[Keys.SELECTED_VIDEO_TRANSPORT] ?: "AUTO",
         customHostIp = prefs[Keys.CUSTOM_HOST_IP] ?: "",
+        rtspAutoFallback = prefs[Keys.RTSP_AUTO_FALLBACK] ?: true,
+        customRtspPath = prefs[Keys.CUSTOM_RTSP_PATH] ?: "",
+        customVideoPort = prefs[Keys.CUSTOM_VIDEO_PORT] ?: 0,
+        videoRotationDeg = prefs[Keys.VIDEO_ROTATION_DEG] ?: 0,
+        videoMirrorHorizontal = prefs[Keys.VIDEO_MIRROR_H] ?: false,
+        mvFilterPreset = mv,
+        firmwareSdTriggerEnabled = prefs[Keys.FIRMWARE_SD_TRIGGER] ?: true,
+        softDescentAssistEnabled = prefs[Keys.SOFT_DESCENT_ASSIST] ?: false,
         gamepadEnabled = prefs[Keys.GAMEPAD_ENABLED] ?: true,
         gamepadThrottleHold = prefs[Keys.GAMEPAD_THROTTLE_HOLD] ?: false,
+        keyboardEnabled = prefs[Keys.KEYBOARD_ENABLED] ?: true,
+        gravityMaxAngleDeg = prefs[Keys.GRAVITY_MAX_ANGLE] ?: 25f,
+        spinnerSpeedRatio = prefs[Keys.SPINNER_SPEED_RATIO] ?: 0.42f,
       )
     }
 
@@ -151,10 +189,50 @@ class UserPreferencesStore(private val context: Context) {
     }
   }
 
+  suspend fun updateLinkEndpointPrefs(
+    rtspAutoFallback: Boolean,
+    customRtspPath: String,
+    customVideoPort: Int,
+  ) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.RTSP_AUTO_FALLBACK] = rtspAutoFallback
+      prefs[Keys.CUSTOM_RTSP_PATH] = customRtspPath.trim()
+      prefs[Keys.CUSTOM_VIDEO_PORT] = if (customVideoPort in 1..65535) customVideoPort else 0
+    }
+  }
+
+  suspend fun updateVideoTransformPrefs(
+    rotationDeg: Int,
+    mirrorHorizontal: Boolean,
+    mvFilterPreset: MvFilterPreset,
+    firmwareSdTriggerEnabled: Boolean,
+  ) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.VIDEO_ROTATION_DEG] = ((rotationDeg % 360) + 360) % 360
+      prefs[Keys.VIDEO_MIRROR_H] = mirrorHorizontal
+      prefs[Keys.MV_FILTER_PRESET] = mvFilterPreset.name
+      prefs[Keys.FIRMWARE_SD_TRIGGER] = firmwareSdTriggerEnabled
+    }
+  }
+
   suspend fun updateGamepadPrefs(enabled: Boolean, throttleHold: Boolean) {
     context.autopilotPrefsDataStore.edit { prefs ->
       prefs[Keys.GAMEPAD_ENABLED] = enabled
       prefs[Keys.GAMEPAD_THROTTLE_HOLD] = throttleHold
+    }
+  }
+
+  suspend fun updateAssistAndInputPrefs(
+    keyboardEnabled: Boolean,
+    softDescentAssistEnabled: Boolean,
+    gravityMaxAngleDeg: Float,
+    spinnerSpeedRatio: Float,
+  ) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.KEYBOARD_ENABLED] = keyboardEnabled
+      prefs[Keys.SOFT_DESCENT_ASSIST] = softDescentAssistEnabled
+      prefs[Keys.GRAVITY_MAX_ANGLE] = gravityMaxAngleDeg.coerceIn(10f, 45f)
+      prefs[Keys.SPINNER_SPEED_RATIO] = spinnerSpeedRatio.coerceIn(0.18f, 0.75f)
     }
   }
 }

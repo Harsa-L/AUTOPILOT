@@ -123,4 +123,30 @@ class FlightStateControllerTest {
 
     controller.disconnect()
   }
+
+  @Test
+  fun `soft descent assist transmits negative throttle taper and firmware SD triggers dispatch cleanly`() = runTest {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    val controller = FlightStateController(scope)
+    val entry = ProtocolCompatibilityRegistry.findById("cooingdv")!!
+    val fake = FakeContractProtocol(entry.descriptor, entry.capabilities)
+
+    controller.connectProtocol(fake, ConnectionConfig("192.168.1.1", 7099, 7070, 7099))
+    controller.triggerFirmwarePhoto()
+    controller.setFirmwareRecord(true)
+    assertTrue(fake.recordedCommands.contains(FlightCommand.TriggerFirmwarePhoto))
+    assertTrue(fake.recordedCommands.contains(FlightCommand.TriggerFirmwareRecord(true)))
+
+    assertTrue(controller.arm())
+    assertTrue(controller.takeoff())
+    fake.recordedCommands.clear()
+    assertTrue(controller.controlledLand(softDescentAssist = true))
+    assertTrue(fake.recordedCommands.contains(FlightCommand.ControlledLand))
+    assertTrue(
+      fake.recordedCommands.any { it is FlightCommand.StickAxes && it.throttle < -0.1f }
+    )
+    assertEquals(FlightState.Ready, controller.flightState.value)
+
+    controller.disconnect()
+  }
 }

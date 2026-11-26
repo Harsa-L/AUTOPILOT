@@ -2,9 +2,12 @@ package com.example.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,22 +34,29 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlipCameraAndroid
+import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.RemoveRedEye
+import androidx.compose.material.icons.filled.RotateRight
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -63,6 +73,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -79,11 +92,14 @@ import com.autopilot.designsystem.AutopilotButtonTone
 import com.autopilot.designsystem.LocalResolvedTheme
 import com.autopilot.designsystem.VirtualStickPad
 import com.autopilot.drone.protocolapi.DroneCapabilities
+import com.autopilot.drone.protocolapi.FlipDirection
 import com.autopilot.flight.control.FlightState
+import com.autopilot.video.MvFilterPreset
 import com.autopilot.video.VideoCaptureState
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.TrackedTarget
 import com.autopilot.vision.VisionFrameResult
+import com.example.input.SpinnerMode
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -110,12 +126,16 @@ fun FlightCockpitScreen(
   val fastFly by viewModel.fastFly.collectAsStateWithLifecycle()
   val headlessMode by viewModel.headlessMode.collectAsStateWithLifecycle()
   val sensitivity by viewModel.sensitivity.collectAsStateWithLifecycle()
+  val automationState by viewModel.automationState.collectAsStateWithLifecycle()
+  val userPrefs by viewModel.userPrefs.collectAsStateWithLifecycle()
 
   var showEmergencyDialog by remember { mutableStateOf(false) }
   var showAircraftSheet by remember { mutableStateOf(false) }
+  var showFlightModesSheet by remember { mutableStateOf(false) }
   var showTrimDialog by remember { mutableStateOf(false) }
   var targetModalSubject by remember { mutableStateOf<TrackedTarget?>(null) }
   var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+  var drawingPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
 
   val caps = selectedEntry.capabilities
   val isConnected = flightState != FlightState.Disconnected
@@ -128,22 +148,56 @@ fun FlightCockpitScreen(
     }
   }
 
+  LaunchedEffect(automationState.trajectoryDrawMode) {
+    if (!automationState.trajectoryDrawMode) {
+      drawingPoints = emptyList()
+    }
+  }
+
   // 100% Full-Screen Video Stream Root with <=30% Translucent Distraction-Free HUD Overlay
   Box(
     modifier = modifier.fillMaxSize().background(Color.Black),
   ) {
-    // Layer 1: 100% Full-Screen Drone Camera Stream & Direct Touch-Target Layer
+    // Layer 1: 100% Full-Screen Drone Camera Stream, Touch-Target & Trajectory Draw Layer
     Box(
       modifier =
         Modifier.fillMaxSize()
           .onSizeChanged { viewportSize = it }
           .pointerInput(
+            automationState.trajectoryDrawMode,
+            viewportSize,
+          ) {
+            if (!automationState.trajectoryDrawMode) return@pointerInput
+            detectDragGestures(
+              onDragStart = { start ->
+                val w = viewportSize.width.coerceAtLeast(1).toFloat()
+                val h = viewportSize.height.coerceAtLeast(1).toFloat()
+                val pt = Offset((start.x / w).coerceIn(0f, 1f), (start.y / h).coerceIn(0f, 1f))
+                drawingPoints = listOf(pt)
+                viewModel.updatePendingTrajectory(drawingPoints)
+              },
+              onDrag = { change, _ ->
+                change.consume()
+                val w = viewportSize.width.coerceAtLeast(1).toFloat()
+                val h = viewportSize.height.coerceAtLeast(1).toFloat()
+                val pt =
+                  Offset(
+                    (change.position.x / w).coerceIn(0f, 1f),
+                    (change.position.y / h).coerceIn(0f, 1f),
+                  )
+                drawingPoints = drawingPoints + pt
+                viewModel.updatePendingTrajectory(drawingPoints)
+              },
+            )
+          }
+          .pointerInput(
             targetSelectionEnabled,
+            automationState.trajectoryDrawMode,
             viewportSize,
             activeFrame?.bitmap?.width,
             activeFrame?.bitmap?.height,
           ) {
-            if (!targetSelectionEnabled) return@pointerInput
+            if (!targetSelectionEnabled || automationState.trajectoryDrawMode) return@pointerInput
             detectTapGestures(
               onTap = { tap ->
                 val norm =
@@ -220,6 +274,36 @@ fun FlightCockpitScreen(
           modifier = Modifier.fillMaxSize(),
         )
       }
+
+      if (automationState.trajectoryDrawMode || automationState.pendingTrajectoryPoints.isNotEmpty()) {
+        val pts = automationState.pendingTrajectoryPoints
+        Canvas(modifier = Modifier.fillMaxSize().testTag("trajectory_draw_canvas")) {
+          if (pts.size >= 2) {
+            val path =
+              Path().apply {
+                moveTo(pts.first().x * size.width, pts.first().y * size.height)
+                for (i in 1 until pts.size) {
+                  lineTo(pts[i].x * size.width, pts[i].y * size.height)
+                }
+              }
+            drawPath(
+              path = path,
+              color = theme.colors.accent,
+              style = Stroke(width = 6f, cap = StrokeCap.Round, join = StrokeJoin.Round),
+            )
+            drawCircle(
+              color = theme.colors.accent,
+              radius = 10f,
+              center = Offset(pts.first().x * size.width, pts.first().y * size.height),
+            )
+            drawCircle(
+              color = Color.White,
+              radius = 9f,
+              center = Offset(pts.last().x * size.width, pts.last().y * size.height),
+            )
+          }
+        }
+      }
     }
 
     // Layer 2: Safe-Area Bounded Translucent Flight HUD Overlay (<=30% area, >=70% clear video, zero scrolling)
@@ -290,7 +374,99 @@ fun FlightCockpitScreen(
           .padding(top = 52.dp, start = 12.dp, end = 12.dp)
           .widthIn(max = 380.dp)
 
-      if (activeTargetTask != null) {
+      if (automationState.trajectoryDrawMode || automationState.pendingTrajectoryPoints.isNotEmpty()) {
+        val hasPath = automationState.pendingTrajectoryPoints.size >= 2
+        val canFlyPath = isConnected && (flightState == FlightState.Armed || flightState == FlightState.Flying)
+        HudTranslucentPill(modifier = topStatusBannerModifier, highlighted = true) {
+          Row(
+            modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Text(
+              text = if (hasPath) "Trajectory Ready" else "Draw path on video",
+              style = MaterialTheme.typography.labelSmall,
+              color = Color.White,
+              maxLines = 1,
+              modifier = Modifier.weight(1f, fill = false),
+            )
+            if (hasPath) {
+              TextButton(
+                onClick = { viewModel.executeTrajectory() },
+                enabled = canFlyPath,
+                modifier = Modifier.testTag("trajectory_run_button"),
+              ) {
+                Text("Fly", style = MaterialTheme.typography.labelSmall, color = theme.colors.accent)
+              }
+            }
+            TextButton(
+              onClick = { viewModel.clearTrajectory() },
+              modifier = Modifier.testTag("trajectory_clear_button"),
+            ) {
+              Text("Clear", style = MaterialTheme.typography.labelSmall, color = Color.White)
+            }
+          }
+        }
+      } else if (automationState.activeSequenceTitle != null) {
+        HudTranslucentPill(modifier = topStatusBannerModifier, highlighted = true) {
+          Row(
+            modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Text(
+              text = "${automationState.activeSequenceTitle} · ${automationState.activeStepLabel ?: ""} (${automationState.stepIndex}/${automationState.totalSteps})",
+              style = MaterialTheme.typography.labelSmall,
+              color = theme.colors.accent,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f, fill = false),
+            )
+            IconButton(
+              onClick = { viewModel.stopAllAutomation() },
+              modifier = Modifier.size(30.dp).minimumInteractiveComponentSize().testTag("stop_automation_button"),
+            ) {
+              Icon(
+                Icons.Default.Close,
+                contentDescription = "Stop flight automation",
+                tint = Color.White,
+                modifier = Modifier.size(14.dp),
+              )
+            }
+          }
+        }
+      } else if (automationState.spinnerMode != SpinnerMode.NONE || automationState.gravityActive) {
+        val statusText =
+          if (automationState.spinnerMode != SpinnerMode.NONE) "${automationState.spinnerMode.label} Active"
+          else "Gravity Tilt Active"
+        HudTranslucentPill(modifier = topStatusBannerModifier, highlighted = true) {
+          Row(
+            modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Text(
+              text = statusText,
+              style = MaterialTheme.typography.labelSmall,
+              color = theme.colors.accent,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f, fill = false),
+            )
+            IconButton(
+              onClick = { viewModel.stopAllAutomation() },
+              modifier = Modifier.size(30.dp).minimumInteractiveComponentSize().testTag("stop_automation_button"),
+            ) {
+              Icon(
+                Icons.Default.Close,
+                contentDescription = "Stop flight mode",
+                tint = Color.White,
+                modifier = Modifier.size(14.dp),
+              )
+            }
+          }
+        }
+      } else if (activeTargetTask != null) {
         val task = activeTargetTask!!
         HudTranslucentPill(modifier = topStatusBannerModifier) {
           Row(
@@ -422,12 +598,14 @@ fun FlightCockpitScreen(
                 headlessMode = headlessMode,
                 isConnected = isConnected,
                 trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
+                modesActive = automationState.hasActiveAutomation || automationState.trajectoryDrawMode,
                 onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
                 onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
-                onFlip360 = { viewModel.commandFlip360() },
+                onFlip360 = { dir -> viewModel.commandFlip360(dir.wireId) },
                 onTiltCamera = { viewModel.tiltCamera(it) },
                 onCalibrateGyro = { viewModel.commandCalibrateGyro() },
                 onOpenTrim = { showTrimDialog = true },
+                onOpenFlightModes = { showFlightModesSheet = true },
                 modifier = Modifier.fillMaxWidth().testTag("hud_modifiers_row"),
               )
 
@@ -477,12 +655,14 @@ fun FlightCockpitScreen(
             headlessMode = headlessMode,
             isConnected = isConnected,
             trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
+            modesActive = automationState.hasActiveAutomation || automationState.trajectoryDrawMode,
             onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
             onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
-            onFlip360 = { viewModel.commandFlip360() },
+            onFlip360 = { dir -> viewModel.commandFlip360(dir.wireId) },
             onTiltCamera = { viewModel.tiltCamera(it) },
             onCalibrateGyro = { viewModel.commandCalibrateGyro() },
             onOpenTrim = { showTrimDialog = true },
+            onOpenFlightModes = { showFlightModesSheet = true },
             modifier = Modifier.fillMaxWidth().testTag("hud_modifiers_row"),
           )
 
@@ -558,6 +738,155 @@ fun FlightCockpitScreen(
         targetModalSubject = null
       },
     )
+  }
+
+  // Quick Flight Modes & KY UFO Automations Sheet
+  if (showFlightModesSheet) {
+    val canEngageFlightAutomation =
+      isConnected && (flightState == FlightState.Armed || flightState == FlightState.Flying)
+    ModalBottomSheet(
+      onDismissRequest = { showFlightModesSheet = false },
+      containerColor = theme.colors.surface,
+      contentColor = theme.colors.textPrimary,
+    ) {
+      Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        Text(
+          text = "Flight Modes & Filters",
+          style = MaterialTheme.typography.titleMedium,
+          color = theme.colors.textPrimary,
+        )
+
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f),
+          ) {
+            Icon(Icons.Default.ScreenRotation, contentDescription = null, tint = theme.colors.accent, modifier = Modifier.size(20.dp))
+            Column {
+              Text("Gravity Tilt Steering", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Tilt phone to pitch & roll around grip angle", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+          }
+          Switch(
+            checked = automationState.gravityActive,
+            enabled = isConnected && viewModel.gravityHandler.isSensorAvailable,
+            onCheckedChange = {
+              viewModel.toggleGravityControl(it)
+              if (it) showFlightModesSheet = false
+            },
+            modifier = Modifier.testTag("mode_gravity_switch"),
+          )
+        }
+
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          FilterChip(
+            selected = automationState.trajectoryDrawMode,
+            onClick = {
+              viewModel.setTrajectoryDrawMode(true)
+              showFlightModesSheet = false
+            },
+            leadingIcon = { Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            label = { Text("Trajectory Draw") },
+            modifier = Modifier.testTag("mode_trajectory_button"),
+          )
+          FilterChip(
+            selected = automationState.spinnerMode == SpinnerMode.ROTATION,
+            enabled = canEngageFlightAutomation || automationState.spinnerMode == SpinnerMode.ROTATION,
+            onClick = {
+              viewModel.toggleSpinner(SpinnerMode.ROTATION)
+              showFlightModesSheet = false
+            },
+            leadingIcon = { Icon(Icons.Default.RotateRight, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            label = { Text("Rot Spin") },
+            modifier = Modifier.testTag("mode_rot_spinner_chip"),
+          )
+          FilterChip(
+            selected = automationState.spinnerMode == SpinnerMode.LATERAL,
+            enabled = canEngageFlightAutomation || automationState.spinnerMode == SpinnerMode.LATERAL,
+            onClick = {
+              viewModel.toggleSpinner(SpinnerMode.LATERAL)
+              showFlightModesSheet = false
+            },
+            label = { Text("Lat Spin") },
+            modifier = Modifier.testTag("mode_lat_spinner_chip"),
+          )
+        }
+
+        Text(
+          text = "MV Visual Filter",
+          style = MaterialTheme.typography.labelMedium,
+          color = theme.colors.textSecondary,
+        )
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          MvFilterPreset.entries.forEach { preset ->
+            FilterChip(
+              selected = userPrefs.mvFilterPreset == preset,
+              onClick = {
+                viewModel.updateVideoTransformSettings(
+                  rotationDeg = userPrefs.videoRotationDeg,
+                  mirrorHorizontal = userPrefs.videoMirrorHorizontal,
+                  mvFilterPreset = preset,
+                  firmwareSdTriggerEnabled = userPrefs.firmwareSdTriggerEnabled,
+                )
+              },
+              label = { Text(preset.label) },
+              modifier = Modifier.testTag("hud_mv_${preset.name.lowercase()}"),
+            )
+          }
+        }
+
+        Text(
+          text = "Timed Flight Macros",
+          style = MaterialTheme.typography.labelMedium,
+          color = theme.colors.textSecondary,
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          viewModel.builtInMacros.forEach { preset ->
+            Surface(
+              modifier =
+                Modifier.fillMaxWidth()
+                  .testTag("macro_${preset.id}")
+                  .clickable(enabled = canEngageFlightAutomation) {
+                    viewModel.startMacro(preset)
+                    showFlightModesSheet = false
+                  },
+              shape = RoundedCornerShape(10.dp),
+              color = theme.colors.canvas,
+              border = BorderStroke(1.dp, theme.colors.borderSubtle),
+            ) {
+              Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+                Text(
+                  text = preset.title,
+                  style = MaterialTheme.typography.bodyMedium,
+                  color = if (canEngageFlightAutomation) theme.colors.textPrimary else theme.colors.textSecondary,
+                )
+                Text(
+                  text = preset.subtitle,
+                  style = MaterialTheme.typography.bodySmall,
+                  color = theme.colors.textSecondary,
+                )
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   // Quick Aircraft Picker Sheet
@@ -874,7 +1203,7 @@ private fun HudTopIconCluster(
   }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HudCapabilityModifiersRow(
   caps: DroneCapabilities,
@@ -884,16 +1213,19 @@ private fun HudCapabilityModifiersRow(
   headlessMode: Boolean,
   isConnected: Boolean,
   trimActive: Boolean,
+  modesActive: Boolean,
   onCycleSpeedTier: () -> Unit,
   onToggleHeadless: () -> Unit,
-  onFlip360: () -> Unit,
+  onFlip360: (FlipDirection) -> Unit,
   onTiltCamera: (Int) -> Unit,
   onCalibrateGyro: () -> Unit,
   onOpenTrim: () -> Unit,
+  onOpenFlightModes: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val theme = LocalResolvedTheme.current
   val canFlip = isConnected && (flightState == FlightState.Armed || flightState == FlightState.Flying)
+  var showFlipDirMenu by remember { mutableStateOf(false) }
 
   FlowRow(
     modifier = modifier,
@@ -926,13 +1258,53 @@ private fun HudCapabilityModifiersRow(
     }
 
     if (caps.supportsFlip) {
-      HudOverlayMiniButton(
-        label = "Flip",
-        enabled = canFlip,
-        onClick = onFlip360,
-        icon = Icons.Default.FlipCameraAndroid,
-        tag = "flip_360_chip",
-      )
+      Box {
+        HudTranslucentPill(
+          highlighted = false,
+          modifier =
+            Modifier.testTag("flip_360_chip")
+              .defaultMinSize(minHeight = 30.dp)
+              .combinedClickable(
+                enabled = canFlip,
+                onClick = { onFlip360(FlipDirection.DEFAULT) },
+                onLongClick = { showFlipDirMenu = true },
+              ),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Default.FlipCameraAndroid,
+              contentDescription = null,
+              tint = if (canFlip) Color.White.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.4f),
+              modifier = Modifier.size(13.dp),
+            )
+            Text(
+              text = "Flip",
+              style = MaterialTheme.typography.labelSmall,
+              color = if (canFlip) Color.White.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.4f),
+              maxLines = 1,
+            )
+          }
+        }
+        DropdownMenu(
+          expanded = showFlipDirMenu,
+          onDismissRequest = { showFlipDirMenu = false },
+        ) {
+          FlipDirection.entries.forEach { dir ->
+            DropdownMenuItem(
+              text = { Text("${dir.label} 360°") },
+              onClick = {
+                showFlipDirMenu = false
+                onFlip360(dir)
+              },
+              modifier = Modifier.testTag("flip_dir_${dir.name.lowercase()}"),
+            )
+          }
+        }
+      }
     }
 
     if (caps.supportsCameraTilt) {
@@ -988,6 +1360,14 @@ private fun HudCapabilityModifiersRow(
       tag = "trim_button",
       activeColor = theme.colors.accent,
     )
+
+    HudOverlayMiniButton(
+      label = "Mode",
+      active = modesActive,
+      onClick = onOpenFlightModes,
+      tag = "flight_modes_chip",
+      activeColor = theme.colors.accent,
+    )
   }
 }
 
@@ -1011,7 +1391,7 @@ private fun HudOverlayMiniButton(
         .clickable(enabled = enabled, onClick = onClick),
   ) {
     Row(
-      modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp),
+      modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {

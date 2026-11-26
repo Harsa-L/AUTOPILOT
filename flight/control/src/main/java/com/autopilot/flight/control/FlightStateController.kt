@@ -311,12 +311,20 @@ class FlightStateController(private val scope: CoroutineScope) {
       return false
     }
     proto.sendCommand(FlightCommand.Flip360(direction))
-    _safetyNotice.value = "360° flip trigger transmitted."
-    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded FLIP_360 on ${proto.descriptor.id}")
+    val dirLabel =
+      when (direction) {
+        1 -> "Forward "
+        2 -> "Backward "
+        3 -> "Left "
+        4 -> "Right "
+        else -> ""
+      }
+    _safetyNotice.value = "${dirLabel}360° flip transmitted."
+    AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded FLIP_360($direction) on ${proto.descriptor.id}")
     return true
   }
 
-  suspend fun controlledLand(): Boolean {
+  suspend fun controlledLand(softDescentAssist: Boolean = false): Boolean {
     val proto = activeProtocol ?: return false
     if (!proto.capabilities.supportsControlledLanding) {
       _safetyNotice.value =
@@ -326,11 +334,37 @@ class FlightStateController(private val scope: CoroutineScope) {
     _flightState.value = FlightState.Landing
     proto.sendCommand(FlightCommand.ControlledLand)
     AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded CONTROLLED_LAND on ${proto.descriptor.id}")
-    delay(800L)
+    if (softDescentAssist) {
+      val steps = floatArrayOf(-0.22f, -0.34f, -0.45f, -0.58f)
+      for (thr in steps) {
+        if (_flightState.value != FlightState.Landing) break
+        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, thr, 0f))
+        delay(175L)
+      }
+      if (_flightState.value == FlightState.Landing) {
+        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+      }
+    } else {
+      delay(800L)
+    }
     if (_flightState.value == FlightState.Landing) {
       _flightState.value = FlightState.Ready
     }
     return true
+  }
+
+  suspend fun triggerFirmwarePhoto() {
+    val proto = activeProtocol ?: return
+    if (proto.capabilities.supportsFirmwareSdCapture) {
+      proto.sendCommand(FlightCommand.TriggerFirmwarePhoto)
+    }
+  }
+
+  suspend fun setFirmwareRecord(active: Boolean) {
+    val proto = activeProtocol ?: return
+    if (proto.capabilities.supportsFirmwareSdCapture) {
+      proto.sendCommand(FlightCommand.TriggerFirmwareRecord(active))
+    }
   }
 
   suspend fun motorStop(): Boolean {

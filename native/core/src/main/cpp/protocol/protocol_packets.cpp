@@ -56,7 +56,10 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
       pkt[5] = yaw;
       pkt[6] = flags;
       pkt[7] = effective_speed;
-      pkt[8] = (state.action_flags & ActionFlag::FAST_FLY) ? 0x01 : 0x00;
+      pkt[8] = static_cast<uint8_t>(
+          ((state.action_flags & ActionFlag::FAST_FLY) ? 0x01 : 0x00) |
+          ((state.action_flags & ActionFlag::SD_CAPTURE_PULSE) ? 0x02 : 0x00) |
+          ((state.action_flags & ActionFlag::SD_RECORD_LATCH) ? 0x04 : 0x00));
       pkt[9] = xor_checksum(&pkt[2], 7);
       pkt[10] = 0x99;
       return pkt;

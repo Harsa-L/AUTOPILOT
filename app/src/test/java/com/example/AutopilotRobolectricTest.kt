@@ -60,11 +60,15 @@ class AutopilotRobolectricTest {
     // Navigate to Flight Controls & Gamepad sub-page
     composeRule.onNodeWithTag("settings_row_controls").performClick()
     composeRule.waitForIdle()
-    composeRule.onNodeWithTag("gamepad_enable_switch").performScrollTo().assertIsDisplayed()
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("gamepad_enable_switch"))
+    composeRule.onNodeWithTag("gamepad_enable_switch").assertIsDisplayed()
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("keyboard_enable_switch"))
+    composeRule.onNodeWithTag("keyboard_enable_switch").assertIsDisplayed()
+    composeRule.onNodeWithTag("soft_descent_switch").assertIsDisplayed()
     composeRule.onNodeWithTag("settings_sub_back").performClick()
     composeRule.waitForIdle()
 
-    // Navigate to Aircraft & Link sub-page, pick X69 LG, and verify RTSP_H265 video mode selector
+    // Navigate to Aircraft & Link sub-page, pick X69 LG, and verify RTSP_H265, fallback, and video transform controls
     composeRule.onNodeWithTag("settings_row_aircraft").performClick()
     composeRule.waitForIdle()
     composeRule.onNodeWithText("Aircraft & Link").assertIsDisplayed()
@@ -74,6 +78,11 @@ class AutopilotRobolectricTest {
     composeRule.onNode(hasScrollAction()).performScrollToIndex(0)
     composeRule.waitForIdle()
     composeRule.onNodeWithTag("video_mode_rtsp_h265").performScrollTo().assertIsDisplayed()
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("rtsp_fallback_switch"))
+    composeRule.onNodeWithTag("rtsp_fallback_switch").assertIsDisplayed()
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("video_rot_90"))
+    composeRule.onNodeWithTag("video_rot_90").assertIsDisplayed()
+    composeRule.onNodeWithTag("settings_mv_warm_fpv").assertIsDisplayed()
     composeRule.onNodeWithTag("settings_sub_back").performClick()
     composeRule.waitForIdle()
     composeRule.onNodeWithTag("settings_back_button").performClick()
@@ -115,6 +124,7 @@ class AutopilotRobolectricTest {
       "flip_360_chip",
       "calibrate_gyro_chip",
       "trim_button",
+      "flight_modes_chip",
       "arm_button",
       "controlled_land_button",
       "motor_stop_button",

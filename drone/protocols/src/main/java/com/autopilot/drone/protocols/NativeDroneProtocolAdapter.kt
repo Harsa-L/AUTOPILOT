@@ -89,6 +89,8 @@ class NativeDroneProtocolAdapter(
           controlRateHz = descriptor.controlRateHz,
           networkHandle = config.networkHandle ?: 0L,
           allowSyntheticHarness = config.allowSyntheticHarness,
+          rtspAllowUdpFallback = config.rtspAllowUdpFallback,
+          rtspPreferUdp = config.preferRtspUdp,
         )
 
       if (handle == 0L) {
@@ -216,7 +218,7 @@ class NativeDroneProtocolAdapter(
       }
       is FlightCommand.Flip360 -> {
         if (capabilities.supportsFlip) {
-          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.FLIP_360)
+          AutopilotNativeBridge.nativeTriggerFlip(handle, command.direction)
         }
       }
       FlightCommand.UnlockMotors -> {
@@ -231,6 +233,20 @@ class NativeDroneProtocolAdapter(
             handle,
             NativeActionFlags.FAST_FLY,
             command.enabled,
+          )
+        }
+      }
+      FlightCommand.TriggerFirmwarePhoto -> {
+        if (capabilities.supportsFirmwareSdCapture) {
+          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.SD_CAPTURE_PULSE)
+        }
+      }
+      is FlightCommand.TriggerFirmwareRecord -> {
+        if (capabilities.supportsFirmwareSdCapture) {
+          AutopilotNativeBridge.nativeSetLatchedAction(
+            handle,
+            NativeActionFlags.SD_RECORD_LATCH,
+            command.active,
           )
         }
       }
@@ -365,7 +381,11 @@ object ProtocolPacketEncoder {
             y,
             f,
             effectiveSpeed.toByte(),
-            if ((actionFlags and NativeActionFlags.FAST_FLY) != 0) 0x01 else 0x00,
+            (
+              (if ((actionFlags and NativeActionFlags.FAST_FLY) != 0) 0x01 else 0x00) or
+                (if ((actionFlags and NativeActionFlags.SD_CAPTURE_PULSE) != 0) 0x02 else 0x00) or
+                (if ((actionFlags and NativeActionFlags.SD_RECORD_LATCH) != 0) 0x04 else 0x00)
+            ).toByte(),
             0x00,
             0x99.toByte(),
           )

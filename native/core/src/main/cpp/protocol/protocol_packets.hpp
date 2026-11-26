@@ -38,8 +38,11 @@ inline constexpr uint32_t HEADLESS = 1u << 5;
 inline constexpr uint32_t FLIP_360 = 1u << 6;
 inline constexpr uint32_t UNLOCK_MOTORS = 1u << 7;
 inline constexpr uint32_t FAST_FLY = 1u << 8;
+inline constexpr uint32_t SD_CAPTURE_PULSE = 1u << 9;
+inline constexpr uint32_t SD_RECORD_LATCH = 1u << 10;
 
-inline constexpr uint32_t kLatchedMask = HEADLESS | EMERGENCY_STOP | FAST_FLY;
+inline constexpr uint32_t kLatchedMask =
+    HEADLESS | EMERGENCY_STOP | FAST_FLY | SD_RECORD_LATCH;
 }  // namespace ActionFlag
 
 struct RxTelemetryUpdate {

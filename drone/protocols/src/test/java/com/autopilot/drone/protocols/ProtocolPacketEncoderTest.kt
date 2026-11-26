@@ -154,5 +154,40 @@ class ProtocolPacketEncoderTest {
     assertTrue(x69.capabilities.supportsFlip)
     assertTrue(x69.capabilities.supportsUnlockCommand)
     assertTrue(x69.capabilities.supportsFastFly)
+    assertTrue(x69.capabilities.supportsFirmwareSdCapture)
+  }
+
+  @Test
+  fun `s2x encodes firmware SD capture pulse and record latch and resolves X69 legacy port 7080`() {
+    val sdPhoto =
+      ProtocolPacketEncoder.encodeControlPacket(
+        ProtocolFamily.S2X,
+        actionFlags = NativeActionFlags.SD_CAPTURE_PULSE,
+      )
+    assertEquals(0x02.toByte(), sdPhoto[8])
+    assertEquals(ByteFraming.xorChecksum(sdPhoto, 2, 9), sdPhoto[9])
+
+    val sdRecord =
+      ProtocolPacketEncoder.encodeControlPacket(
+        ProtocolFamily.S2X,
+        actionFlags = NativeActionFlags.SD_RECORD_LATCH,
+      )
+    assertEquals(0x04.toByte(), sdRecord[8])
+    assertEquals(ByteFraming.xorChecksum(sdRecord, 2, 9), sdRecord[9])
+
+    val x69 = ProtocolCompatibilityRegistry.findById("x69_lg")!!.descriptor
+    assertEquals(
+      7080,
+      x69.resolvedVideoPort(com.autopilot.drone.protocolapi.VideoTransportType.RAW_UDP_JPEG),
+    )
+    assertEquals(
+      554,
+      x69.resolvedVideoPort(com.autopilot.drone.protocolapi.VideoTransportType.RTSP_H265),
+    )
+    assertEquals(
+      9123,
+      x69.resolvedVideoPort(com.autopilot.drone.protocolapi.VideoTransportType.RTSP_H265, customPort = 9123),
+    )
+    assertEquals("/custom/cam", x69.resolvedRtspPath("/custom/cam"))
   }
 }
