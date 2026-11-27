@@ -72,6 +72,14 @@ class AnnexBVideoDecoder(private val isHevc: Boolean) {
             if (newW > 0 && newH > 0 && (newW != width || newH != height)) {
               width = newW
               height = newH
+              if (!recreateImageReader(activeCodec, newW, newH)) {
+                AutopilotLog.warn(
+                  SubsystemTag.VIDEO,
+                  "Re-initializing $mimeType decoder for dynamic resolution ${newW}x${newH}",
+                )
+                releaseCodecOnly()
+                break
+              }
             }
           }
           outIdx >= 0 -> {
@@ -93,6 +101,34 @@ class AnnexBVideoDecoder(private val isHevc: Boolean) {
     releaseCodecOnly()
     csdCached = null
     latestBitmap.set(null)
+  }
+
+  private fun recreateImageReader(mc: MediaCodec, newW: Int, newH: Int): Boolean {
+    val thread = readerThread ?: return false
+    val oldReader = imageReader
+    return runCatching {
+        val newReader = ImageReader.newInstance(newW, newH, ImageFormat.YUV_420_888, 3)
+        newReader.setOnImageAvailableListener(
+          { r ->
+            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            try {
+              val bmp = yuv420ToBitmap(img)
+              if (bmp != null) {
+                latestBitmap.set(bmp)
+              }
+            } finally {
+              img.close()
+            }
+          },
+          Handler(thread.looper),
+        )
+        mc.setOutputSurface(newReader.surface)
+        imageReader = newReader
+        runCatching { oldReader?.close() }
+        AutopilotLog.info(SubsystemTag.VIDEO, "Resized $mimeType ImageReader to ${newW}x${newH}")
+        true
+      }
+      .getOrDefault(false)
   }
 
   private fun initDecoder(csd: ByteArray): Boolean {

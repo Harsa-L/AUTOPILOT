@@ -18,6 +18,7 @@ import com.autopilot.drone.protocolapi.VideoFramePacket
 import com.autopilot.drone.protocolapi.VideoTransportType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -92,11 +93,13 @@ class VideoPipelineController(
   private var frameTransform: VideoFrameTransform = VideoFrameTransform()
 
   private var streamJob: Job? = null
+  private var staleWatchdogJob: Job? = null
   private var annexBDecoder: AnnexBVideoDecoder? = null
   private var activeRecorder: Mp4FrameRecorder? = null
   private var recorderContext: Context? = null
   private var reusablePixels = IntArray(0)
   private var lastFpsWindowStartMs = 0L
+  private var lastDecodedFrameAtMs = 0L
   private var framesInWindow = 0
   private var currentFps = 0f
   private var totalDecoded = 0L
@@ -110,11 +113,13 @@ class VideoPipelineController(
     val mime =
       when (transport) {
         VideoTransportType.RTSP_H264,
-        VideoTransportType.RAW_UDP_H264 -> MediaFormat.MIMETYPE_VIDEO_AVC
+        VideoTransportType.RAW_UDP_H264,
+        VideoTransportType.LEWEI_TCP_H264 -> MediaFormat.MIMETYPE_VIDEO_AVC
         VideoTransportType.RAW_UDP_H265,
         VideoTransportType.RTSP_H265 -> MediaFormat.MIMETYPE_VIDEO_HEVC
         VideoTransportType.RAW_UDP_JPEG,
-        VideoTransportType.RTP_JPEG -> "image/jpeg (Skia/libjpeg-turbo)"
+        VideoTransportType.RTP_JPEG,
+        VideoTransportType.RTSP_MJPEG -> "image/jpeg (Skia/libjpeg-turbo)"
         VideoTransportType.SYNTHETIC_TEST_PATTERN -> "Synthetic RGB24 Calibration Pattern"
         VideoTransportType.NONE -> return "No video transport"
       }
@@ -142,11 +147,13 @@ class VideoPipelineController(
     framesInWindow = 0
     currentFps = 0f
     lastFpsWindowStartMs = System.currentTimeMillis()
+    lastDecodedFrameAtMs = lastFpsWindowStartMs
 
     annexBDecoder =
       when (transport) {
         VideoTransportType.RTSP_H264,
-        VideoTransportType.RAW_UDP_H264 -> AnnexBVideoDecoder(isHevc = false)
+        VideoTransportType.RAW_UDP_H264,
+        VideoTransportType.LEWEI_TCP_H264 -> AnnexBVideoDecoder(isHevc = false)
         VideoTransportType.RAW_UDP_H265,
         VideoTransportType.RTSP_H265 -> AnnexBVideoDecoder(isHevc = true)
         else -> null
@@ -158,8 +165,11 @@ class VideoPipelineController(
         detail =
           when (transport) {
             VideoTransportType.RTSP_H264,
-            VideoTransportType.RTSP_H265 ->
+            VideoTransportType.RTSP_H265,
+            VideoTransportType.RTSP_MJPEG ->
               "Negotiating RTSP stream (${protocol.descriptor.rtspPath ?: "port ${protocol.descriptor.videoPort}"}) — $codecInfo"
+            VideoTransportType.LEWEI_TCP_H264 ->
+              "Connecting Lewei TCP :${protocol.descriptor.videoPort} H.264 — $codecInfo"
             VideoTransportType.SYNTHETIC_TEST_PATTERN ->
               "Initializing Isolated Loopback Test Pattern…"
             VideoTransportType.NONE -> "Protocol does not expose a video stream."
@@ -178,6 +188,7 @@ class VideoPipelineController(
             totalDecoded++
             framesInWindow++
             val now = System.currentTimeMillis()
+            lastDecodedFrameAtMs = now
             val elapsed = now - lastFpsWindowStartMs
             if (elapsed >= 1000L) {
               currentFps = (framesInWindow * 1000f) / elapsed.toFloat()
@@ -217,6 +228,22 @@ class VideoPipelineController(
         }
         .flowOn(dispatchers.default)
         .launchIn(scope)
+
+    staleWatchdogJob =
+      scope.launch {
+        while (true) {
+          delay(1000L)
+          if (_streamState.value is VideoStreamState.ActiveFrame &&
+            System.currentTimeMillis() - lastDecodedFrameAtMs > 3500L
+          ) {
+            _streamState.value =
+              VideoStreamState.WaitingForKeyframe(
+                transport = transport,
+                detail = "Video stream stalled (>3.5s) — awaiting next frame…",
+              )
+          }
+        }
+      }
 
     AutopilotLog.info(SubsystemTag.VIDEO, "VideoPipeline attached to ${protocol.descriptor.id} ($transport · $codecInfo)")
   }
@@ -303,6 +330,8 @@ class VideoPipelineController(
         }
       }
     }
+    staleWatchdogJob?.cancel()
+    staleWatchdogJob = null
     streamJob?.cancel()
     streamJob = null
     annexBDecoder?.release()
@@ -313,7 +342,8 @@ class VideoPipelineController(
   private fun decodePacket(packet: VideoFramePacket): Bitmap? {
     return when (packet.transport) {
       VideoTransportType.RAW_UDP_JPEG,
-      VideoTransportType.RTP_JPEG -> {
+      VideoTransportType.RTP_JPEG,
+      VideoTransportType.RTSP_MJPEG -> {
         val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
         BitmapFactory.decodeByteArray(packet.payload, 0, packet.payload.size, opts)
       }
@@ -323,7 +353,8 @@ class VideoPipelineController(
       VideoTransportType.RAW_UDP_H264,
       VideoTransportType.RAW_UDP_H265,
       VideoTransportType.RTSP_H264,
-      VideoTransportType.RTSP_H265 -> {
+      VideoTransportType.RTSP_H265,
+      VideoTransportType.LEWEI_TCP_H264 -> {
         annexBDecoder?.decodeAccessUnit(packet.payload, packet.timestampUs)
       }
       VideoTransportType.NONE -> null

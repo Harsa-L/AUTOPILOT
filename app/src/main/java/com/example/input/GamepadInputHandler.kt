@@ -54,6 +54,7 @@ class GamepadInputHandler(
 
   private var l2Down = false
   private var r2Down = false
+  private var chordFiredForHold = false
   private var prevHatX = 0
   private var prevHatY = 0
   private var heldThrottle = 0f
@@ -146,22 +147,27 @@ class GamepadInputHandler(
     }
     prevHatX = hatX
 
-    // Analog shoulder triggers (disambiguating LTRIGGER/BRAKE & RTRIGGER/GAS)
+    // Analog shoulder triggers (disambiguating LTRIGGER/BRAKE & RTRIGGER/GAS).
+    // Defer single-trigger MOTOR_STOP/FAST_FLY until release so slight stagger never races L2+R2 E-STOP.
     val lVal = maxOf(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE))
     val rVal = maxOf(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS))
     val nextL2 = lVal > 0.65f
     val nextR2 = rVal > 0.65f
-    if ((nextL2 && !l2Down) || (nextR2 && !r2Down)) {
-      if (nextL2 && nextR2) {
-        onAction(GamepadAction.EMERGENCY_STOP_CHORD)
-      } else if (nextL2 && !l2Down) {
-        onAction(GamepadAction.TOGGLE_FAST_FLY)
-      } else if (nextR2 && !r2Down) {
-        onAction(GamepadAction.MOTOR_STOP)
-      }
+    if (nextL2 && nextR2 && !chordFiredForHold) {
+      chordFiredForHold = true
+      onAction(GamepadAction.EMERGENCY_STOP_CHORD)
+    }
+    if (!nextL2 && l2Down && !chordFiredForHold) {
+      onAction(GamepadAction.TOGGLE_FAST_FLY)
+    }
+    if (!nextR2 && r2Down && !chordFiredForHold) {
+      onAction(GamepadAction.MOTOR_STOP)
     }
     l2Down = nextL2
     r2Down = nextR2
+    if (!l2Down && !r2Down) {
+      chordFiredForHold = false
+    }
     return true
   }
 
@@ -203,14 +209,18 @@ class GamepadInputHandler(
       }
       KeyEvent.KEYCODE_BUTTON_L2 -> {
         l2Down = true
-        if (r2Down) onAction(GamepadAction.EMERGENCY_STOP_CHORD)
-        else onAction(GamepadAction.TOGGLE_FAST_FLY)
+        if (r2Down && !chordFiredForHold) {
+          chordFiredForHold = true
+          onAction(GamepadAction.EMERGENCY_STOP_CHORD)
+        }
         true
       }
       KeyEvent.KEYCODE_BUTTON_R2 -> {
         r2Down = true
-        if (l2Down) onAction(GamepadAction.EMERGENCY_STOP_CHORD)
-        else onAction(GamepadAction.MOTOR_STOP)
+        if (l2Down && !chordFiredForHold) {
+          chordFiredForHold = true
+          onAction(GamepadAction.EMERGENCY_STOP_CHORD)
+        }
         true
       }
       KeyEvent.KEYCODE_BUTTON_START -> {
@@ -236,8 +246,16 @@ class GamepadInputHandler(
 
   fun handleKeyUp(keyCode: Int, event: KeyEvent): Boolean {
     if (!enabled || keyCode == KeyEvent.KEYCODE_BACK) return false
-    if (keyCode == KeyEvent.KEYCODE_BUTTON_L2) l2Down = false
-    if (keyCode == KeyEvent.KEYCODE_BUTTON_R2) r2Down = false
+    if (keyCode == KeyEvent.KEYCODE_BUTTON_L2) {
+      if (l2Down && !chordFiredForHold) onAction(GamepadAction.TOGGLE_FAST_FLY)
+      l2Down = false
+      if (!r2Down) chordFiredForHold = false
+    }
+    if (keyCode == KeyEvent.KEYCODE_BUTTON_R2) {
+      if (r2Down && !chordFiredForHold) onAction(GamepadAction.MOTOR_STOP)
+      r2Down = false
+      if (!l2Down) chordFiredForHold = false
+    }
     return isGameController(event.device) && keyCode != KeyEvent.KEYCODE_BACK
   }
 

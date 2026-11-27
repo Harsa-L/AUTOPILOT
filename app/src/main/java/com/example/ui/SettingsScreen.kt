@@ -174,6 +174,10 @@ fun SettingsAircraftScreen(
   val wifiLink by viewModel.wifiLink.collectAsStateWithLifecycle()
   val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
   val detectedMatch = remember(wifiLink.ssid) { viewModel.detectedProtocolFromWifi() }
+  val detectedMatches = remember(wifiLink.ssid) {
+    wifiLink.ssid?.let { com.autopilot.drone.protocolapi.ProtocolCompatibilityRegistry.findMatchesBySsid(it) }
+      .orEmpty()
+  }
   var rtspPathText by remember { mutableStateOf(prefs.customRtspPath) }
   var videoPortText by remember {
     mutableStateOf(if (prefs.customVideoPort > 0) prefs.customVideoPort.toString() else "")
@@ -308,7 +312,28 @@ fun SettingsAircraftScreen(
               style = MaterialTheme.typography.bodySmall,
               color = theme.colors.textSecondary,
             )
-            if (detectedMatch != null && detectedMatch.descriptor.id != desc.id) {
+            if (detectedMatches.size > 1) {
+              Spacer(Modifier.height(6.dp))
+              Text(
+                text = "Ambiguous SSID prefix ($ssid) — choose matching variant:",
+                style = MaterialTheme.typography.labelSmall,
+                color = theme.colors.statusWarning,
+              )
+              Spacer(Modifier.height(4.dp))
+              FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+              ) {
+                detectedMatches.forEach { match ->
+                  FilterChip(
+                    selected = match.descriptor.id == desc.id,
+                    onClick = { viewModel.selectProtocol(match.descriptor.id) },
+                    label = { Text(match.descriptor.displayName.substringBefore(" (")) },
+                    modifier = Modifier.testTag("ssid_match_chip_${match.descriptor.id}"),
+                  )
+                }
+              }
+            } else if (detectedMatch != null && detectedMatch.descriptor.id != desc.id) {
               Spacer(Modifier.height(6.dp))
               AutopilotButton(
                 text = "Match ${detectedMatch.descriptor.displayName.substringBefore(" (")}",
@@ -406,15 +431,30 @@ fun SettingsAircraftScreen(
           )
           Spacer(Modifier.height(4.dp))
           FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(
+              selected = prefs.videoRotationAuto,
+              onClick = {
+                viewModel.updateVideoTransformSettings(
+                  rotationDeg = selectedEntry.descriptor.defaultAutoRotationDeg,
+                  mirrorHorizontal = prefs.videoMirrorHorizontal,
+                  mvFilterPreset = prefs.mvFilterPreset,
+                  firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                  videoRotationAuto = true,
+                )
+              },
+              label = { Text("Auto (${selectedEntry.descriptor.defaultAutoRotationDeg}°)") },
+              modifier = Modifier.testTag("video_rot_auto"),
+            )
             listOf(0, 90, 180, 270).forEach { deg ->
               FilterChip(
-                selected = prefs.videoRotationDeg == deg,
+                selected = !prefs.videoRotationAuto && prefs.videoRotationDeg == deg,
                 onClick = {
                   viewModel.updateVideoTransformSettings(
                     rotationDeg = deg,
                     mirrorHorizontal = prefs.videoMirrorHorizontal,
                     mvFilterPreset = prefs.mvFilterPreset,
                     firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                    videoRotationAuto = false,
                   )
                 },
                 label = { Text("${deg}°") },
@@ -440,6 +480,7 @@ fun SettingsAircraftScreen(
                   mirrorHorizontal = it,
                   mvFilterPreset = prefs.mvFilterPreset,
                   firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                  videoRotationAuto = prefs.videoRotationAuto,
                 )
               },
               modifier = Modifier.testTag("video_mirror_switch"),
@@ -465,6 +506,7 @@ fun SettingsAircraftScreen(
                     mirrorHorizontal = prefs.videoMirrorHorizontal,
                     mvFilterPreset = preset,
                     firmwareSdTriggerEnabled = prefs.firmwareSdTriggerEnabled,
+                    videoRotationAuto = prefs.videoRotationAuto,
                   )
                 },
                 label = { Text(preset.label) },
@@ -496,6 +538,7 @@ fun SettingsAircraftScreen(
                   mirrorHorizontal = prefs.videoMirrorHorizontal,
                   mvFilterPreset = prefs.mvFilterPreset,
                   firmwareSdTriggerEnabled = it,
+                  videoRotationAuto = prefs.videoRotationAuto,
                 )
               },
               modifier = Modifier.testTag("firmware_sd_trigger_switch"),
@@ -517,6 +560,8 @@ fun SettingsAircraftScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
           ) {
+            if (caps.isVideoOnly) StatusBadge("Video-Only Feed", StatusTone.WARNING)
+            if (caps.supportsCameraSwitch) StatusBadge("Dual Camera", StatusTone.NOMINAL)
             if (caps.supportsUnlockCommand) StatusBadge("Wire Unlock", StatusTone.NOMINAL)
             if (caps.supportsTakeoff) StatusBadge("Takeoff", StatusTone.NOMINAL)
             if (caps.supportsControlledLanding) StatusBadge("Controlled Land", StatusTone.NOMINAL)
@@ -886,6 +931,8 @@ private fun formatVideoModeLabel(mode: VideoTransportType): String =
     VideoTransportType.RAW_UDP_H265 -> "UDP H.265"
     VideoTransportType.RTSP_H264 -> "RTSP H.264"
     VideoTransportType.RTSP_H265 -> "RTSP H.265"
+    VideoTransportType.RTSP_MJPEG -> "RTSP MJPEG"
+    VideoTransportType.LEWEI_TCP_H264 -> "Lewei H.264"
     VideoTransportType.SYNTHETIC_TEST_PATTERN -> "Harness"
     VideoTransportType.NONE -> "None"
   }

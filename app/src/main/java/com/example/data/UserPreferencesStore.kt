@@ -40,6 +40,7 @@ data class AutopilotUserPrefs(
   val customRtspPath: String = "",
   val customVideoPort: Int = 0,
   val videoRotationDeg: Int = 0,
+  val videoRotationAuto: Boolean = true,
   val videoMirrorHorizontal: Boolean = false,
   val mvFilterPreset: MvFilterPreset = MvFilterPreset.NATURAL,
   val firmwareSdTriggerEnabled: Boolean = true,
@@ -76,6 +77,7 @@ class UserPreferencesStore(private val context: Context) {
     val CUSTOM_RTSP_PATH = stringPreferencesKey("custom_rtsp_path")
     val CUSTOM_VIDEO_PORT = intPreferencesKey("custom_video_port")
     val VIDEO_ROTATION_DEG = intPreferencesKey("video_rotation_deg")
+    val VIDEO_ROTATION_AUTO = booleanPreferencesKey("video_rotation_auto")
     val VIDEO_MIRROR_H = booleanPreferencesKey("video_mirror_horizontal")
     val MV_FILTER_PRESET = stringPreferencesKey("mv_filter_preset")
     val FIRMWARE_SD_TRIGGER = booleanPreferencesKey("firmware_sd_trigger")
@@ -119,6 +121,7 @@ class UserPreferencesStore(private val context: Context) {
         customRtspPath = prefs[Keys.CUSTOM_RTSP_PATH] ?: "",
         customVideoPort = prefs[Keys.CUSTOM_VIDEO_PORT] ?: 0,
         videoRotationDeg = prefs[Keys.VIDEO_ROTATION_DEG] ?: 0,
+        videoRotationAuto = prefs[Keys.VIDEO_ROTATION_AUTO] ?: true,
         videoMirrorHorizontal = prefs[Keys.VIDEO_MIRROR_H] ?: false,
         mvFilterPreset = mv,
         firmwareSdTriggerEnabled = prefs[Keys.FIRMWARE_SD_TRIGGER] ?: true,
@@ -206,9 +209,11 @@ class UserPreferencesStore(private val context: Context) {
     mirrorHorizontal: Boolean,
     mvFilterPreset: MvFilterPreset,
     firmwareSdTriggerEnabled: Boolean,
+    videoRotationAuto: Boolean = false,
   ) {
     context.autopilotPrefsDataStore.edit { prefs ->
       prefs[Keys.VIDEO_ROTATION_DEG] = ((rotationDeg % 360) + 360) % 360
+      prefs[Keys.VIDEO_ROTATION_AUTO] = videoRotationAuto
       prefs[Keys.VIDEO_MIRROR_H] = mirrorHorizontal
       prefs[Keys.MV_FILTER_PRESET] = mvFilterPreset.name
       prefs[Keys.FIRMWARE_SD_TRIGGER] = firmwareSdTriggerEnabled

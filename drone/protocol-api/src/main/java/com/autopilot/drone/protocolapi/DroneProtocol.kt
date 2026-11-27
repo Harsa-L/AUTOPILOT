@@ -18,6 +18,8 @@ interface DroneProtocol {
 
   suspend fun sendCommand(command: FlightCommand)
 
+  fun setControlArmed(armed: Boolean) {}
+
   fun telemetry(): Flow<DroneTelemetry>
 
   fun videoFrames(): Flow<VideoFramePacket>

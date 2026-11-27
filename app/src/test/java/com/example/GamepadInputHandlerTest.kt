@@ -94,11 +94,31 @@ class GamepadInputHandlerTest {
     assertTrue(actions.contains(GamepadAction.TILT_UP))
     moveEvent.recycle()
 
-    // Simultaneous L2 + R2 analog trigger pull invokes EMERGENCY_STOP_CHORD
+    // Staggered R2 first, then L2 chord: MUST invoke ONLY EMERGENCY_STOP_CHORD (no MOTOR_STOP leak!)
+    actions.clear()
+    val r2First = createJoystickMotionEvent(lTrigger = 0f, rTrigger = 0.9f)
+    assertTrue(handler.handleMotionEvent(r2First))
+    assertTrue(actions.isEmpty())
+    r2First.recycle()
+
     val chordEvent = createJoystickMotionEvent(lTrigger = 0.9f, rTrigger = 0.9f)
     assertTrue(handler.handleMotionEvent(chordEvent))
-    assertEquals(GamepadAction.EMERGENCY_STOP_CHORD, actions.last())
+    assertEquals(listOf(GamepadAction.EMERGENCY_STOP_CHORD), actions)
     chordEvent.recycle()
+
+    val releaseBoth = createJoystickMotionEvent(lTrigger = 0f, rTrigger = 0f)
+    assertTrue(handler.handleMotionEvent(releaseBoth))
+    assertEquals(listOf(GamepadAction.EMERGENCY_STOP_CHORD), actions)
+    releaseBoth.recycle()
+
+    // Single R2 press and release without L2 triggers MOTOR_STOP
+    val r2SoloDown = createJoystickMotionEvent(lTrigger = 0f, rTrigger = 0.9f)
+    handler.handleMotionEvent(r2SoloDown)
+    r2SoloDown.recycle()
+    val r2SoloUp = createJoystickMotionEvent(lTrigger = 0f, rTrigger = 0f)
+    handler.handleMotionEvent(r2SoloUp)
+    r2SoloUp.recycle()
+    assertEquals(listOf(GamepadAction.EMERGENCY_STOP_CHORD, GamepadAction.MOTOR_STOP), actions)
   }
 
   @Test

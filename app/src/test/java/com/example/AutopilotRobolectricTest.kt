@@ -80,14 +80,26 @@ class AutopilotRobolectricTest {
     composeRule.onNodeWithTag("video_mode_rtsp_h265").performScrollTo().assertIsDisplayed()
     composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("rtsp_fallback_switch"))
     composeRule.onNodeWithTag("rtsp_fallback_switch").assertIsDisplayed()
-    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("video_rot_90"))
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("video_rot_auto"))
+    composeRule.onNodeWithTag("video_rot_auto").assertIsDisplayed()
     composeRule.onNodeWithTag("video_rot_90").assertIsDisplayed()
     composeRule.onNodeWithTag("settings_mv_warm_fpv").assertIsDisplayed()
+
+    // Selecting video-only flow_bl60x disables flight actions and shows Video-Only banner on HUD
+    composeRule.onNode(hasScrollAction()).performScrollToNode(hasTestTag("protocol_card_flow_bl60x"))
+    composeRule.onNodeWithTag("protocol_card_flow_bl60x").performClick()
+    composeRule.waitForIdle()
     composeRule.onNodeWithTag("settings_sub_back").performClick()
     composeRule.waitForIdle()
     composeRule.onNodeWithTag("settings_back_button").performClick()
     composeRule.waitForIdle()
+    composeRule.onNodeWithTag("video_only_banner").assertIsDisplayed()
 
+    // Switch back to s2x via quick aircraft picker and confirm sticks are restored
+    composeRule.onNodeWithTag("aircraft_selector_pill").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("quick_aircraft_s2x").performClick()
+    composeRule.waitForIdle()
     composeRule.onNodeWithTag("left_stick_pad").assertIsDisplayed()
   }
 

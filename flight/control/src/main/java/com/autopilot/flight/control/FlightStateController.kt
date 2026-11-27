@@ -212,6 +212,7 @@ class FlightStateController(private val scope: CoroutineScope) {
     telemetryJob?.cancel()
     activeProtocol?.let { proto ->
       runCatching {
+        proto.setControlArmed(false)
         proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
         proto.disconnect()
       }
@@ -225,13 +226,18 @@ class FlightStateController(private val scope: CoroutineScope) {
   }
 
   fun arm(): Boolean {
+    val proto = activeProtocol
+    if (proto != null && proto.capabilities.isVideoOnly) {
+      _safetyNotice.value = "${proto.descriptor.displayName} is video-only; flight commands disabled."
+      return false
+    }
     val state = _flightState.value
     if (state != FlightState.Ready && state != FlightState.Connected) {
       _safetyNotice.value = "Cannot arm from state ${state.label}."
       return false
     }
+    proto?.setControlArmed(true)
     _flightState.value = FlightState.Armed
-    val proto = activeProtocol
     if (proto != null && proto.capabilities.supportsUnlockCommand) {
       scope.launch { proto.sendCommand(FlightCommand.UnlockMotors) }
       _safetyNotice.value = "Motors unlocked & armed. Verify clear airspace."
@@ -244,10 +250,15 @@ class FlightStateController(private val scope: CoroutineScope) {
 
   suspend fun unlockMotors(): Boolean {
     val proto = activeProtocol ?: return false
+    if (proto.capabilities.isVideoOnly) {
+      _safetyNotice.value = "${proto.descriptor.displayName} is video-only; flight commands disabled."
+      return false
+    }
     if (!proto.capabilities.supportsUnlockCommand) {
       _safetyNotice.value = "${proto.descriptor.displayName} does not support motor unlock command."
       return false
     }
+    proto.setControlArmed(true)
     proto.sendCommand(FlightCommand.UnlockMotors)
     if (_flightState.value == FlightState.Ready || _flightState.value == FlightState.Connected) {
       _flightState.value = FlightState.Armed
@@ -258,6 +269,7 @@ class FlightStateController(private val scope: CoroutineScope) {
   }
 
   fun disarm() {
+    activeProtocol?.setControlArmed(false)
     val state = _flightState.value
     if (state == FlightState.Armed || state == FlightState.Emergency) {
       _flightState.value = FlightState.Ready
@@ -267,6 +279,7 @@ class FlightStateController(private val scope: CoroutineScope) {
 
   suspend fun sendStickInput(roll: Float, pitch: Float, throttle: Float, yaw: Float) {
     val proto = activeProtocol ?: return
+    if (proto.capabilities.isVideoOnly) return
     val state = _flightState.value
     if (state is FlightState.Emergency ||
       state is FlightState.ConnectionLost ||
@@ -281,8 +294,13 @@ class FlightStateController(private val scope: CoroutineScope) {
 
   suspend fun takeoff(): Boolean {
     val proto = activeProtocol ?: return false
-    if (!proto.capabilities.supportsTakeoff) {
-      _safetyNotice.value = "${proto.descriptor.displayName} does not support takeoff command."
+    if (proto.capabilities.isVideoOnly || !proto.capabilities.supportsTakeoff) {
+      _safetyNotice.value =
+        if (proto.capabilities.isVideoOnly) {
+          "${proto.descriptor.displayName} is video-only; flight commands disabled."
+        } else {
+          "${proto.descriptor.displayName} does not support takeoff command."
+        }
       return false
     }
     if (_flightState.value != FlightState.Armed) {
@@ -301,7 +319,7 @@ class FlightStateController(private val scope: CoroutineScope) {
 
   suspend fun flip360(direction: Int = 0): Boolean {
     val proto = activeProtocol ?: return false
-    if (!proto.capabilities.supportsFlip) {
+    if (proto.capabilities.isVideoOnly || !proto.capabilities.supportsFlip) {
       _safetyNotice.value = "${proto.descriptor.displayName} does not support 360° flip stunts."
       return false
     }
@@ -326,23 +344,30 @@ class FlightStateController(private val scope: CoroutineScope) {
 
   suspend fun controlledLand(softDescentAssist: Boolean = false): Boolean {
     val proto = activeProtocol ?: return false
-    if (!proto.capabilities.supportsControlledLanding) {
+    if (proto.capabilities.isVideoOnly || !proto.capabilities.supportsControlledLanding) {
       _safetyNotice.value =
-        "${proto.descriptor.displayName} lacks verified controlled landing."
+        if (proto.capabilities.isVideoOnly) {
+          "${proto.descriptor.displayName} is video-only; flight commands disabled."
+        } else {
+          "${proto.descriptor.displayName} lacks verified controlled landing."
+        }
       return false
     }
     _flightState.value = FlightState.Landing
     proto.sendCommand(FlightCommand.ControlledLand)
     AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded CONTROLLED_LAND on ${proto.descriptor.id}")
     if (softDescentAssist) {
+      val cfg = _sensitivity.value
+      val trimR = cfg.trimRoll.coerceIn(-0.25f, 0.25f)
+      val trimP = cfg.trimPitch.coerceIn(-0.25f, 0.25f)
       val steps = floatArrayOf(-0.22f, -0.34f, -0.45f, -0.58f)
       for (thr in steps) {
         if (_flightState.value != FlightState.Landing) break
-        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, thr, 0f))
+        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, thr, 0f, trimR, trimP))
         delay(175L)
       }
       if (_flightState.value == FlightState.Landing) {
-        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+        proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f, trimR, trimP))
       }
     } else {
       delay(800L)
@@ -367,14 +392,26 @@ class FlightStateController(private val scope: CoroutineScope) {
     }
   }
 
+  suspend fun switchCamera(cameraIndex: Int): Boolean {
+    val proto = activeProtocol ?: return false
+    if (!proto.capabilities.supportsCameraSwitch) {
+      _safetyNotice.value = "${proto.descriptor.displayName} does not support camera switching."
+      return false
+    }
+    proto.sendCommand(FlightCommand.SwitchCamera(cameraIndex))
+    _safetyNotice.value = "Switched to camera $cameraIndex."
+    return true
+  }
+
   suspend fun motorStop(): Boolean {
     val proto = activeProtocol ?: return false
-    if (!proto.capabilities.supportsMotorStop) {
+    if (proto.capabilities.isVideoOnly || !proto.capabilities.supportsMotorStop) {
       _safetyNotice.value = "${proto.descriptor.displayName} does not support MotorStop."
       return false
     }
     proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
     proto.sendCommand(FlightCommand.MotorStop)
+    proto.setControlArmed(false)
     _flightState.value = FlightState.Ready
     _safetyNotice.value = "Motor stop transmitted."
     AutopilotLog.warn(SubsystemTag.FLIGHT_SAFETY, "Commanded MOTOR_STOP")
@@ -383,6 +420,10 @@ class FlightStateController(private val scope: CoroutineScope) {
 
   suspend fun emergencyStop() {
     val proto = activeProtocol
+    if (proto != null && proto.capabilities.isVideoOnly) {
+      _safetyNotice.value = "${proto.descriptor.displayName} is video-only; flight commands disabled."
+      return
+    }
     _flightState.value = FlightState.Emergency
     _safetyNotice.value =
       "EMERGENCY STOP TRIGGERED — Immediate motor cutoff sent; aircraft may free-fall."
@@ -391,11 +432,12 @@ class FlightStateController(private val scope: CoroutineScope) {
       proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
       proto.sendCommand(FlightCommand.EmergencyStop)
     }
+    proto?.setControlArmed(false)
   }
 
   suspend fun calibrateGyro() {
     val proto = activeProtocol ?: return
-    if (!proto.capabilities.supportsGyroCalibration) {
+    if (proto.capabilities.isVideoOnly || !proto.capabilities.supportsGyroCalibration) {
       _safetyNotice.value = "Gyro calibration unsupported by ${proto.descriptor.displayName}."
       return
     }
@@ -452,12 +494,25 @@ class FlightStateController(private val scope: CoroutineScope) {
           delay(500L)
           val state = _flightState.value
           if (state == FlightState.Flying || state == FlightState.Armed || state == FlightState.TakingOff) {
+            val t = _telemetry.value
+            val errno = t?.lastSocketErrno ?: 0
+            if (!protocol.descriptor.isSyntheticHarness &&
+              (errno == 1 || errno == 101 || errno == 113)
+            ) {
+              protocol.setControlArmed(false)
+              _flightState.value = FlightState.ConnectionLost("Socket send error (errno=$errno)")
+              _safetyNotice.value =
+                "Watchdog: Wi-Fi socket unreachable (errno=$errno). Controls disarmed; verify drone AP."
+              protocol.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
+              continue
+            }
             val age = System.currentTimeMillis() - lastRxSeenAtMs
             // For real hardware sessions with inbound packets previously seen, warn after 4s silence.
             if (!protocol.descriptor.isSyntheticHarness &&
-              (_telemetry.value?.packetsReceived ?: 0L) > 0L &&
+              (t?.packetsReceived ?: 0L) > 0L &&
               age > 4000L
             ) {
+              protocol.setControlArmed(false)
               _flightState.value = FlightState.ConnectionLost("Telemetry timeout (${age}ms)")
               _safetyNotice.value =
                 "Watchdog: no RX datagrams for ${age}ms. Controls centered; verify drone link."

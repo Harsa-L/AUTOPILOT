@@ -12,6 +12,11 @@ enum class ProtocolFamily(val wireId: Int) {
   COOINGDV_JIELI(4),
   WIFI_CAM(5),
   X69_LG(6),
+  FLOW_BL60X(7),
+  COOINGDV_GL(8),
+  FLOW_KY_Y_SERIES(9),
+  JIELI_AC79(10),
+  LEWEI(11),
   ISOLATED_TEST_HARNESS(99),
 }
 
@@ -20,10 +25,12 @@ enum class VideoTransportType {
   NONE,
   RTSP_H264,
   RTSP_H265,
+  RTSP_MJPEG,
   RTP_JPEG,
   RAW_UDP_JPEG,
   RAW_UDP_H264,
   RAW_UDP_H265,
+  LEWEI_TCP_H264,
   SYNTHETIC_TEST_PATTERN,
 }
 
@@ -67,8 +74,19 @@ data class DroneCapabilities(
   val supportsFastFly: Boolean = false,
   val supportsVideoRecording: Boolean = false,
   val supportsFirmwareSdCapture: Boolean = false,
+  val supportsCameraSwitch: Boolean = false,
+  val isVideoOnly: Boolean = false,
   val supportedVideoModes: List<VideoTransportType> = emptyList(),
-)
+) {
+  val supportsAnyFlightControl: Boolean
+    get() =
+      !isVideoOnly &&
+        (supportsTakeoff ||
+          supportsControlledLanding ||
+          supportsMotorStop ||
+          supportsEmergencyMotorStop ||
+          supportsUnlockCommand)
+}
 
 @Serializable
 data class ProtocolDescriptor(
@@ -91,6 +109,7 @@ data class ProtocolDescriptor(
   val provenanceNote: String,
   val isSyntheticHarness: Boolean = false,
   val alternateHostIps: List<String> = emptyList(),
+  val defaultAutoRotationDeg: Int = 0,
 ) {
   fun resolvedVideoPort(transport: VideoTransportType, customPort: Int = 0): Int {
     if (customPort in 1..65535) return customPort
@@ -175,6 +194,8 @@ sealed interface FlightCommand {
 
   data class TriggerFirmwareRecord(val active: Boolean) : FlightCommand
 
+  data class SwitchCamera(val cameraIndex: Int) : FlightCommand
+
   data object RequestKeyframe : FlightCommand
 }
 
@@ -195,6 +216,10 @@ data class DroneTelemetry(
   val lastCommandHex: String,
   val isSyntheticHarness: Boolean = false,
   val firmwareStatusFlags: Int? = null,
+  val controlPacketsReceived: Long = 0L,
+  val videoPacketsReceived: Long = 0L,
+  val controlArmed: Boolean = false,
+  val lastSocketErrno: Int = 0,
 )
 
 data class VideoFramePacket(

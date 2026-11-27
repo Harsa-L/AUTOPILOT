@@ -111,6 +111,24 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeSetLatchedAction(JNIEn
 }
 
 JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeSetControlArmed(JNIEnv* /* env */,
+                                                                          jobject /* thiz */,
+                                                                          jlong handle,
+                                                                          jboolean armed) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (session) session->set_control_armed(armed == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeSwitchCamera(JNIEnv* /* env */,
+                                                                       jobject /* thiz */,
+                                                                       jlong handle,
+                                                                       jint camera_index) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (session) session->switch_camera(camera_index);
+}
+
+JNIEXPORT void JNICALL
 Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeRequestKeyframe(JNIEnv* /* env */,
                                                                           jobject /* thiz */,
                                                                           jlong handle) {
@@ -132,8 +150,8 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeReadSessionCounters(JN
                                                                              jobject /* thiz */,
                                                                              jlong handle) {
   auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
-  jlongArray out = env->NewLongArray(9);
-  jlong vals[9] = {0, 0, 0, 0, 0, 0, 0, -1, -1};
+  jlongArray out = env->NewLongArray(13);
+  jlong vals[13] = {0, 0, 0, 0, 0, 0, 0, -1, -1, 0, 0, 0, 0};
   if (session) {
     const auto snap = session->snapshot();
     vals[0] = snap.running ? 1 : 0;
@@ -145,8 +163,12 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeReadSessionCounters(JN
     vals[6] = static_cast<jlong>(snap.last_rx_timestamp_ms);
     vals[7] = static_cast<jlong>(snap.battery_percent);
     vals[8] = static_cast<jlong>(snap.firmware_status_flags);
+    vals[9] = static_cast<jlong>(snap.control_packets_received);
+    vals[10] = static_cast<jlong>(snap.video_packets_received);
+    vals[11] = snap.control_armed ? 1 : 0;
+    vals[12] = static_cast<jlong>(snap.last_socket_errno);
   }
-  env->SetLongArrayRegion(out, 0, 9, vals);
+  env->SetLongArrayRegion(out, 0, 13, vals);
   return out;
 }
 

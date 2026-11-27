@@ -163,6 +163,13 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   private val _gamepadStatus = MutableStateFlow(GamepadStatus())
   val gamepadStatus: StateFlow<GamepadStatus> = _gamepadStatus.asStateFlow()
 
+  private val _detectedProtocolMatches = MutableStateFlow<List<ProtocolRegistryEntry>>(emptyList())
+  val detectedProtocolMatches: StateFlow<List<ProtocolRegistryEntry>> =
+    _detectedProtocolMatches.asStateFlow()
+
+  private val _activeCameraIndex = MutableStateFlow(1)
+  val activeCameraIndex: StateFlow<Int> = _activeCameraIndex.asStateFlow()
+
   private val _visionOverlayEnabled = MutableStateFlow(false)
   val visionOverlayEnabled: StateFlow<Boolean> = _visionOverlayEnabled.asStateFlow()
 
@@ -180,12 +187,15 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   private var activeSessionRowId: Long? = null
   private var leftStickX = 0f
-  private var leftStickY = -0.6f
+  private var leftStickY = 0f
   private var rightStickX = 0f
   private var rightStickY = 0f
   private var manualStickActive = false
   private var gamepadAxesActive = false
   private var keyboardAxesActive = false
+  private var keyboardThrottleInput = 0f
+  private var keyboardHoldJob: Job? = null
+  private var lastVisionTiltAtMs = 0L
   private var trackingLoopJob: Job? = null
 
   init {
@@ -244,10 +254,16 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     startVisionTrackingLoop()
   }
 
-  private fun syncLivePrefTargets(prefs: AutopilotUserPrefs) {
+  private fun syncLivePrefTargets(
+    prefs: AutopilotUserPrefs,
+    entry: ProtocolRegistryEntry = _selectedEntry.value,
+  ) {
+    val effectiveRot =
+      if (prefs.videoRotationAuto) entry.descriptor.defaultAutoRotationDeg
+      else prefs.videoRotationDeg
     videoPipeline.updateFrameTransform(
       VideoFrameTransform(
-        rotationDeg = prefs.videoRotationDeg,
+        rotationDeg = effectiveRot,
         mirrorHorizontal = prefs.videoMirrorHorizontal,
         mvFilter = prefs.mvFilterPreset,
       )
@@ -259,13 +275,23 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   fun selectProtocol(protocolId: String, persist: Boolean = true) {
     val entry =
       ProtocolCompatibilityRegistry.findById(protocolId, includeSyntheticHarness = false) ?: return
+    val changed = entry.descriptor.id != _selectedEntry.value.descriptor.id
     _selectedEntry.value = entry
     _customHostIp.value = entry.descriptor.defaultHostIp
     _videoTransportOverride.value = null
+    _activeCameraIndex.value = 1
+    syncLivePrefTargets(userPrefs.value, entry)
     if (persist) {
       viewModelScope.launch {
         prefsStore.updateSelectedProtocol(protocolId)
         prefsStore.updateStreamOverrides("AUTO", entry.descriptor.defaultHostIp)
+        if (changed) {
+          prefsStore.updateLinkEndpointPrefs(
+            rtspAutoFallback = userPrefs.value.rtspAutoFallback,
+            customRtspPath = "",
+            customVideoPort = 0,
+          )
+        }
       }
     }
   }
@@ -297,27 +323,32 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun refreshWifi() {
-    wifiController.refreshCurrentWifiState()
+    val snap = wifiController.refreshCurrentWifiState()
+    _detectedProtocolMatches.value =
+      snap.ssid?.let { ProtocolCompatibilityRegistry.findMatchesBySsid(it) }.orEmpty()
   }
 
   fun detectedProtocolFromWifi(): ProtocolRegistryEntry? {
     val ssid = wifiLink.value.ssid ?: return null
-    return productionProtocols.firstOrNull { entry ->
-      entry.descriptor.ssidHints.any { hint -> ssid.startsWith(hint, ignoreCase = true) }
-    }
+    return ProtocolCompatibilityRegistry.findMatchesBySsid(ssid).firstOrNull()
   }
 
   fun bindWifiApForSelectedProtocol() {
-    val hint = _selectedEntry.value.descriptor.ssidHints.firstOrNull() ?: "WIFI"
+    val desc = _selectedEntry.value.descriptor
+    val hints = desc.ssidHints.ifEmpty { listOf("WIFI") }
+    val currentSsid =
+      wifiLink.value.ssid?.takeIf { ssid ->
+        hints.any { h -> ssid.startsWith(h, ignoreCase = true) }
+      }
     flightController.markDiscovering()
-    wifiController.requestDroneApBinding(hint) { handle ->
+    wifiController.requestDroneApBinding(hints, preferredSsid = currentSsid) { handle ->
       if (handle != null) {
         viewModelScope.launch {
           repository.recordTrace(
-            protocolId = _selectedEntry.value.descriptor.id,
+            protocolId = desc.id,
             subsystem = "CONNECTIVITY",
             severity = "INFO",
-            message = "Connected to aircraft Wi-Fi network ($hint*)",
+            message = "Connected to aircraft Wi-Fi network (${currentSsid ?: hints.first()})",
           )
         }
       }
@@ -328,8 +359,11 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     val entry = _selectedEntry.value
     val desc = entry.descriptor
     val prefs = userPrefs.value
+    val freshWifi = wifiController.refreshCurrentWifiState()
+    _detectedProtocolMatches.value =
+      freshWifi.ssid?.let { ProtocolCompatibilityRegistry.findMatchesBySsid(it) }.orEmpty()
     val host = _customHostIp.value.trim().ifEmpty { desc.defaultHostIp }
-    val wifiHandle = wifiLink.value.boundNetworkHandle
+    val wifiHandle = freshWifi.boundNetworkHandle ?: wifiLink.value.boundNetworkHandle
     val selectedVideo = _videoTransportOverride.value ?: desc.videoTransport
 
     val resolvedPort = desc.resolvedVideoPort(selectedVideo, prefs.customVideoPort)
@@ -341,7 +375,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
           VideoTransportType.RTSP_H265 ->
             if (desc.id == "x69_lg") "/live/ch00_1" else desc.rtspPath
           VideoTransportType.RTSP_H264 ->
-            if (desc.id == "x69_lg") "rtsp://$host:7070/webcam" else desc.rtspPath
+            if (desc.id == "x69_lg") "/live/ch00_1" else desc.rtspPath
           else -> desc.rtspPath
         }
       }
@@ -354,7 +388,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         videoPort = resolvedPort,
         heartbeatPort = desc.heartbeatPort,
         rtspPath = resolvedRtsp,
-        ssid = wifiLink.value.ssid,
+        ssid = freshWifi.ssid ?: wifiLink.value.ssid,
         networkHandle = wifiHandle,
         allowSyntheticHarness = false,
         videoTransportOverride = selectedVideo,
@@ -407,6 +441,9 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         )
       }
       activeSessionRowId = null
+      _activeCameraIndex.value = 1
+      keyboardHoldJob?.cancel()
+      keyboardHoldJob = null
       videoPipeline.detach()
       flightController.disconnect()
       wifiController.releaseBinding()
@@ -494,8 +531,22 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       }
     }
     leftStickX = axes.yaw
+    keyboardThrottleInput = axes.throttle
     if (axes.throttle != 0f) {
-      leftStickY = (leftStickY + axes.throttle * 0.12f).coerceIn(-1f, 1f)
+      leftStickY = (leftStickY + axes.throttle * 0.08f).coerceIn(-1f, 1f)
+      if (keyboardHoldJob == null || keyboardHoldJob?.isActive != true) {
+        keyboardHoldJob =
+          viewModelScope.launch {
+            while (keyboardThrottleInput != 0f) {
+              delay(50L)
+              leftStickY = (leftStickY + keyboardThrottleInput * 0.05f).coerceIn(-1f, 1f)
+              pushSticks()
+            }
+          }
+      }
+    } else {
+      keyboardHoldJob?.cancel()
+      keyboardHoldJob = null
     }
     rightStickX = axes.roll
     rightStickY = axes.pitch
@@ -642,11 +693,14 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     mirrorHorizontal: Boolean,
     mvFilterPreset: MvFilterPreset,
     firmwareSdTriggerEnabled: Boolean,
+    videoRotationAuto: Boolean = false,
   ) {
     val normRot = ((rotationDeg % 360) + 360) % 360
+    val effectiveRot =
+      if (videoRotationAuto) _selectedEntry.value.descriptor.defaultAutoRotationDeg else normRot
     videoPipeline.updateFrameTransform(
       VideoFrameTransform(
-        rotationDeg = normRot,
+        rotationDeg = effectiveRot,
         mirrorHorizontal = mirrorHorizontal,
         mvFilter = mvFilterPreset,
       )
@@ -657,6 +711,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         mirrorHorizontal = mirrorHorizontal,
         mvFilterPreset = mvFilterPreset,
         firmwareSdTriggerEnabled = firmwareSdTriggerEnabled,
+        videoRotationAuto = videoRotationAuto,
       )
     }
   }
@@ -758,6 +813,12 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun tiltCamera(delta: Int) {
     viewModelScope.launch { flightController.tiltCamera(delta) }
+  }
+
+  fun switchCamera() {
+    val next = if (_activeCameraIndex.value == 1) 2 else 1
+    _activeCameraIndex.value = next
+    viewModelScope.launch { flightController.switchCamera(next) }
   }
 
   fun captureSnapshot() {
@@ -946,7 +1007,10 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
                 yaw = cmd.yaw,
               )
               cmd.cameraTiltDelta?.let { delta ->
-                if (delta != 0) flightController.tiltCamera(delta)
+                if (delta != 0 && now - lastVisionTiltAtMs >= 350L) {
+                  lastVisionTiltAtMs = now
+                  flightController.tiltCamera(delta)
+                }
               }
             }
           } else {
@@ -1083,6 +1147,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     super.onCleared()
     gravityHandler.setActive(false)
     automationCoordinator.stopAll()
+    keyboardHoldJob?.cancel()
     trackingLoopJob?.cancel()
     videoPipeline.detach()
     visionCoordinator.close()

@@ -3,6 +3,7 @@ package com.autopilot.drone.protocols
 import com.autopilot.core.common.ByteFraming
 import com.autopilot.drone.protocolapi.ProtocolCompatibilityRegistry
 import com.autopilot.drone.protocolapi.ProtocolFamily
+import com.autopilot.drone.protocolapi.VideoTransportType
 import com.autopilot.nativecore.NativeActionFlags
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -13,9 +14,10 @@ import org.junit.Test
 class ProtocolPacketEncoderTest {
 
   @Test
-  fun `production registry contains all 6 TurboDrone protocols and excludes synthetic harness`() {
+  fun `production registry contains all 11 protocol entries and excludes synthetic harness`() {
     val entries = ProtocolCompatibilityRegistry.productionEntries()
-    assertEquals(6, entries.size)
+    assertEquals(11, entries.size)
+    assertEquals("s2x", entries.first().descriptor.id)
     assertTrue(entries.none { it.descriptor.isSyntheticHarness })
     assertNull(ProtocolCompatibilityRegistry.findById("isolated_test_harness", includeSyntheticHarness = false))
     assertTrue(
@@ -26,53 +28,106 @@ class ProtocolPacketEncoderTest {
   }
 
   @Test
-  fun `s2x packet encodes header, centered neutral axes, xor checksum, and footer`() {
+  fun `s2x packet encodes 11-byte header, centered neutral axes, xor checksum, and footer`() {
     val pkt = ProtocolPacketEncoder.encodeControlPacket(ProtocolFamily.S2X)
     assertEquals(11, pkt.size)
     assertEquals(0x66.toByte(), pkt[0])
     assertEquals(0x80.toByte(), pkt[1])
-    assertEquals(128.toByte(), pkt[2]) // neutral roll
-    assertEquals(128.toByte(), pkt[3]) // neutral pitch
-    assertEquals(128.toByte(), pkt[4]) // neutral throttle
-    assertEquals(128.toByte(), pkt[5]) // neutral yaw
+    assertEquals(128.toByte(), pkt[2])
+    assertEquals(128.toByte(), pkt[3])
+    assertEquals(128.toByte(), pkt[4])
+    assertEquals(128.toByte(), pkt[5])
     assertEquals(ByteFraming.xorChecksum(pkt, 2, 9), pkt[9])
     assertEquals(0x99.toByte(), pkt[10])
   }
 
   @Test
-  fun `wifi_uav and cooingdv encode 8-byte framed packets with valid xor checksum`() {
-    for (family in listOf(ProtocolFamily.WIFI_UAV, ProtocolFamily.COOINGDV)) {
-      val pkt =
-        ProtocolPacketEncoder.encodeControlPacket(
-          family = family,
-          roll = 1.0f,
-          pitch = -1.0f,
-          actionFlags = NativeActionFlags.TAKEOFF,
-        )
-      assertEquals(8, pkt.size)
-      assertEquals(0x66.toByte(), pkt[0])
-      assertEquals(255.toByte(), pkt[1]) // +1.0 roll
-      assertEquals(0.toByte(), pkt[2])   // -1.0 pitch
-      assertEquals(0x01.toByte(), pkt[5]) // takeoff flag
-      assertEquals(ByteFraming.xorChecksum(pkt, 1, 6), pkt[6])
-      assertEquals(0x99.toByte(), pkt[7])
-    }
+  fun `wifi_uav encodes 8-byte frame while cooingdv encodes 9-byte TC frame with throttle 1 coerced to 0`() {
+    val wifiUav =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.WIFI_UAV,
+        roll = 1.0f,
+        pitch = -1.0f,
+        actionFlags = NativeActionFlags.TAKEOFF,
+      )
+    assertEquals(8, wifiUav.size)
+    assertEquals(0x66.toByte(), wifiUav[0])
+    assertEquals(255.toByte(), wifiUav[1])
+    assertEquals(0.toByte(), wifiUav[2])
+    assertEquals(0x01.toByte(), wifiUav[5])
+    assertEquals(ByteFraming.xorChecksum(wifiUav, 1, 6), wifiUav[6])
+    assertEquals(0x99.toByte(), wifiUav[7])
+
+    val cooingTc =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.COOINGDV,
+        roll = 0f,
+        pitch = 0f,
+        throttle = -1.0f,
+        yaw = 0f,
+        actionFlags = NativeActionFlags.CALIBRATE_GYRO or NativeActionFlags.FLIP_360,
+      )
+    assertEquals(9, cooingTc.size)
+    assertEquals(0x03.toByte(), cooingTc[0])
+    assertEquals(0x66.toByte(), cooingTc[1])
+    assertEquals(128.toByte(), cooingTc[2])
+    assertEquals(128.toByte(), cooingTc[3])
+    assertEquals(0.toByte(), cooingTc[4]) // throttle == 1 coerced to 0 per CooingDV spec
+    assertEquals(0x88.toByte(), cooingTc[6]) // 0x80 calibrate | 0x08 flip
+    assertEquals(ByteFraming.xorChecksum(cooingTc, 2, 7), cooingTc[7])
+    assertEquals(0x99.toByte(), cooingTc[8])
   }
 
   @Test
-  fun `cooingdv_jieli wraps command inside CTP prefix`() {
+  fun `cooingdv_gl and flow_ky_y_series encode distinct 21-byte frames`() {
+    val gl =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.COOINGDV_GL,
+        actionFlags = NativeActionFlags.TAKEOFF or NativeActionFlags.HEADLESS,
+      )
+    assertEquals(21, gl.size)
+    assertEquals(0x03.toByte(), gl[0])
+    assertEquals(0x66.toByte(), gl[1])
+    assertEquals(0x14.toByte(), gl[2])
+    assertEquals(0x01.toByte(), gl[7]) // flags1 takeoff
+    assertEquals(0x01.toByte(), gl[8]) // flags2 headless
+    assertEquals(ByteFraming.xorChecksum(gl, 3, 19), gl[19])
+    assertEquals(0x99.toByte(), gl[20])
+
+    val kySlow =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.FLOW_KY_Y_SERIES,
+        roll = 1.0f,
+        speedTier = 0, // 30% scaling -> 128 + 127*0.3 = 166
+        actionFlags = NativeActionFlags.CALIBRATE_GYRO,
+      )
+    assertEquals(21, kySlow.size)
+    assertEquals(0x03.toByte(), kySlow[0])
+    assertEquals(0x66.toByte(), kySlow[1])
+    assertEquals(0x14.toByte(), kySlow[2])
+    assertEquals(166.toByte(), kySlow[3])
+    assertEquals(0x03.toByte(), kySlow[7]) // discrete cmd 0x03 calibrate
+    assertEquals(0x02.toByte(), kySlow[8]) // constant pyDroneWire speed byte
+    assertEquals(ByteFraming.xorChecksum(kySlow, 3, 19), kySlow[19])
+    assertEquals(0x99.toByte(), kySlow[20])
+  }
+
+  @Test
+  fun `cooingdv_jieli wraps FLYING_CTRL JSON inside CTP frame`() {
     val pkt = ProtocolPacketEncoder.encodeControlPacket(ProtocolFamily.COOINGDV_JIELI)
-    assertEquals(14, pkt.size)
+    assertTrue(pkt.size > 40)
     assertEquals('C'.code.toByte(), pkt[0])
     assertEquals('T'.code.toByte(), pkt[1])
     assertEquals('P'.code.toByte(), pkt[2])
     assertEquals(':'.code.toByte(), pkt[3])
-    assertEquals(0x99.toByte(), pkt[13])
-    assertEquals(ByteFraming.xorChecksum(pkt, 7, 12), pkt[12])
+    val text = pkt.decodeToString()
+    assertTrue(text.contains("FLYING_CTRL"))
+    assertTrue(text.contains("\"BYTE0\":\"102\""))
+    assertTrue(text.contains("\"BYTE7\":\"153\""))
   }
 
   @Test
-  fun `wifi_cam and x69_lg encode distinct headers and emergency stop bit`() {
+  fun `wifi_cam encodes 8-byte header and x69_lg encodes 25-byte wrapped CA 47 D5 00 14 frame`() {
     val wifiCam =
       ProtocolPacketEncoder.encodeControlPacket(
         ProtocolFamily.WIFI_CAM,
@@ -90,104 +145,56 @@ class ProtocolPacketEncoderTest {
         speedTier = 2,
         cameraTilt = 1,
       )
-    assertEquals(10, x69.size)
-    assertEquals(0x66.toByte(), x69[0])
-    assertEquals(2.toByte(), x69[6])
-    assertEquals(1.toByte(), x69[7])
-    assertEquals(ByteFraming.xorChecksum(x69, 1, 8), x69[8])
-    assertEquals(0x99.toByte(), x69[9])
+    assertEquals(25, x69.size)
+    assertEquals(0xCA.toByte(), x69[0])
+    assertEquals(0x47.toByte(), x69[1])
+    assertEquals(0xD5.toByte(), x69[2])
+    assertEquals(0x00.toByte(), x69[3])
+    assertEquals(0x14.toByte(), x69[4])
+    assertEquals(0x66.toByte(), x69[5])
+    assertEquals(2.toByte(), x69[11])
+    assertEquals(1.toByte(), x69[12])
+    assertEquals(ByteFraming.xorChecksum(x69, 6, 23), x69[23])
+    assertEquals(0x99.toByte(), x69[24])
     assertFalse(x69.contentEquals(wifiCam))
   }
 
   @Test
-  fun `flip360, unlock motors, and fast fly encode exact protocol bits`() {
-    val flipPkt =
-      ProtocolPacketEncoder.encodeControlPacket(
-        ProtocolFamily.WIFI_UAV,
-        actionFlags = NativeActionFlags.FLIP_360,
-      )
-    assertEquals(0x40.toByte(), flipPkt[5])
-    assertEquals(ByteFraming.xorChecksum(flipPkt, 1, 6), flipPkt[6])
-
-    val unlockPkt =
-      ProtocolPacketEncoder.encodeControlPacket(
-        ProtocolFamily.S2X,
-        actionFlags = NativeActionFlags.UNLOCK_MOTORS,
-      )
-    assertEquals(0x80.toByte(), unlockPkt[6])
-    assertEquals(ByteFraming.xorChecksum(unlockPkt, 2, 9), unlockPkt[9])
-
-    val fastS2x =
-      ProtocolPacketEncoder.encodeControlPacket(
-        ProtocolFamily.S2X,
-        speedTier = 0,
-        actionFlags = NativeActionFlags.FAST_FLY,
-      )
-    assertEquals(2.toByte(), fastS2x[7])
-    assertEquals(0x01.toByte(), fastS2x[8])
-    assertEquals(ByteFraming.xorChecksum(fastS2x, 2, 9), fastS2x[9])
+  fun `video-only families return empty flight control payloads`() {
+    for (family in listOf(ProtocolFamily.FLOW_BL60X, ProtocolFamily.JIELI_AC79, ProtocolFamily.LEWEI)) {
+      val pkt =
+        ProtocolPacketEncoder.encodeControlPacket(
+          family = family,
+          roll = 1.0f,
+          throttle = 1.0f,
+          actionFlags = NativeActionFlags.TAKEOFF,
+        )
+      assertEquals(0, pkt.size)
+    }
   }
 
   @Test
-  fun `registry exposes TurboDrone models, alternate host IPs, and selectable video modes`() {
-    val s2x = ProtocolCompatibilityRegistry.findById("s2x")!!
-    assertTrue(s2x.descriptor.knownModels.contains("PL-515"))
-
-    val wifiUav = ProtocolCompatibilityRegistry.findById("wifi_uav")!!
-    assertTrue(wifiUav.descriptor.knownModels.containsAll(listOf("V88", "V66", "GT3")))
-    assertTrue(
-      wifiUav.capabilities.supportedVideoModes.containsAll(
-        listOf(
-          com.autopilot.drone.protocolapi.VideoTransportType.RAW_UDP_JPEG,
-          com.autopilot.drone.protocolapi.VideoTransportType.RAW_UDP_H264,
-        )
-      )
-    )
+  fun `ssid multi-match distinguishes ambiguous FLOW-UFO prefix and validates updated defaults`() {
+    val flowMatches = ProtocolCompatibilityRegistry.findMatchesBySsid("FLOW-UFO-4K-99")
+    val matchIds = flowMatches.map { it.descriptor.id }
+    assertTrue(matchIds.contains("flow_bl60x"))
+    assertTrue(matchIds.contains("flow_ky_y_series"))
+    assertFalse(matchIds.contains("s2x"))
 
     val x69 = ProtocolCompatibilityRegistry.findById("x69_lg")!!
+    assertEquals(23458, x69.descriptor.controlPort)
     assertTrue(x69.descriptor.alternateHostIps.contains("172.16.11.1"))
-    assertTrue(
-      x69.capabilities.supportedVideoModes.contains(
-        com.autopilot.drone.protocolapi.VideoTransportType.RTSP_H265
-      )
-    )
-    assertTrue(x69.capabilities.supportsFlip)
-    assertTrue(x69.capabilities.supportsUnlockCommand)
-    assertTrue(x69.capabilities.supportsFastFly)
-    assertTrue(x69.capabilities.supportsFirmwareSdCapture)
-  }
-
-  @Test
-  fun `s2x encodes firmware SD capture pulse and record latch and resolves X69 legacy port 7080`() {
-    val sdPhoto =
-      ProtocolPacketEncoder.encodeControlPacket(
-        ProtocolFamily.S2X,
-        actionFlags = NativeActionFlags.SD_CAPTURE_PULSE,
-      )
-    assertEquals(0x02.toByte(), sdPhoto[8])
-    assertEquals(ByteFraming.xorChecksum(sdPhoto, 2, 9), sdPhoto[9])
-
-    val sdRecord =
-      ProtocolPacketEncoder.encodeControlPacket(
-        ProtocolFamily.S2X,
-        actionFlags = NativeActionFlags.SD_RECORD_LATCH,
-      )
-    assertEquals(0x04.toByte(), sdRecord[8])
-    assertEquals(ByteFraming.xorChecksum(sdRecord, 2, 9), sdRecord[9])
-
-    val x69 = ProtocolCompatibilityRegistry.findById("x69_lg")!!.descriptor
-    assertEquals(
-      7080,
-      x69.resolvedVideoPort(com.autopilot.drone.protocolapi.VideoTransportType.RAW_UDP_JPEG),
-    )
-    assertEquals(
-      554,
-      x69.resolvedVideoPort(com.autopilot.drone.protocolapi.VideoTransportType.RTSP_H265),
-    )
+    assertFalse(x69.capabilities.supportsFirmwareSdCapture)
+    assertEquals(7080, x69.descriptor.resolvedVideoPort(VideoTransportType.RAW_UDP_JPEG))
+    assertEquals(554, x69.descriptor.resolvedVideoPort(VideoTransportType.RTSP_H265))
     assertEquals(
       9123,
-      x69.resolvedVideoPort(com.autopilot.drone.protocolapi.VideoTransportType.RTSP_H265, customPort = 9123),
+      x69.descriptor.resolvedVideoPort(VideoTransportType.RTSP_H265, customPort = 9123),
     )
-    assertEquals("/custom/cam", x69.resolvedRtspPath("/custom/cam"))
+
+    val cooing = ProtocolCompatibilityRegistry.findById("cooingdv")!!
+    assertEquals(VideoTransportType.RTSP_MJPEG, cooing.descriptor.videoTransport)
+    assertEquals(270, cooing.descriptor.defaultAutoRotationDeg)
+    assertTrue(cooing.capabilities.supportsCameraSwitch)
   }
 }

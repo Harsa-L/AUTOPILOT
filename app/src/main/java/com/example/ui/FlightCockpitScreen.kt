@@ -37,9 +37,9 @@ import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.RemoveRedEye
-import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -122,6 +122,8 @@ fun FlightCockpitScreen(
   val activeTargetTask by viewModel.activeTargetTask.collectAsStateWithLifecycle()
   val targetActionConfig by viewModel.targetActionConfig.collectAsStateWithLifecycle()
   val selectedEntry by viewModel.selectedEntry.collectAsStateWithLifecycle()
+  val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+  val activeCameraIndex by viewModel.activeCameraIndex.collectAsStateWithLifecycle()
   val speedTier by viewModel.speedTier.collectAsStateWithLifecycle()
   val fastFly by viewModel.fastFly.collectAsStateWithLifecycle()
   val headlessMode by viewModel.headlessMode.collectAsStateWithLifecycle()
@@ -338,8 +340,22 @@ fun FlightCockpitScreen(
           horizontalArrangement = Arrangement.spacedBy(5.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
+          val shortName = selectedEntry.descriptor.displayName.substringBefore(" (")
+          val pillTitle =
+            if (!isConnected) {
+              shortName
+            } else {
+              val linkSuffix =
+                when {
+                  caps.isVideoOnly -> "VID"
+                  (telemetry?.controlPacketsReceived ?: 0L) > 0L -> "RX"
+                  else -> "1W"
+                }
+              val batSuffix = telemetry?.batteryPercent?.let { " $it%" }.orEmpty()
+              "$shortName · $linkSuffix$batSuffix"
+            }
           HudAircraftPill(
-            aircraftName = selectedEntry.descriptor.displayName.substringBefore(" ("),
+            aircraftName = pillTitle,
             flightState = flightState,
             onClick = { showAircraftSheet = true },
             modifier = Modifier.weight(1f, fill = false),
@@ -569,17 +585,19 @@ fun FlightCockpitScreen(
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.Bottom,
         ) {
-          VirtualStickPad(
-            label = "THR / YAW",
-            horizontalAxisLabel = "Yaw",
-            verticalAxisLabel = "Throttle",
-            autoCenterY = false,
-            onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
-            onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-            size = stickSize,
-            hudOverlay = true,
-            tag = "left_stick_pad",
-          )
+          if (!caps.isVideoOnly) {
+            VirtualStickPad(
+              label = "THR / YAW",
+              horizontalAxisLabel = "Yaw",
+              verticalAxisLabel = "Throttle",
+              autoCenterY = false,
+              onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
+              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+              size = stickSize,
+              hudOverlay = true,
+              tag = "left_stick_pad",
+            )
+          }
 
           Box(
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
@@ -597,12 +615,14 @@ fun FlightCockpitScreen(
                 fastFly = fastFly,
                 headlessMode = headlessMode,
                 isConnected = isConnected,
+                activeCameraIndex = activeCameraIndex,
                 trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
                 modesActive = automationState.hasActiveAutomation || automationState.trajectoryDrawMode,
                 onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
                 onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
                 onFlip360 = { dir -> viewModel.commandFlip360(dir.wireId) },
                 onTiltCamera = { viewModel.tiltCamera(it) },
+                onSwitchCamera = { viewModel.switchCamera() },
                 onCalibrateGyro = { viewModel.commandCalibrateGyro() },
                 onOpenTrim = { showTrimDialog = true },
                 onOpenFlightModes = { showFlightModesSheet = true },
@@ -626,17 +646,19 @@ fun FlightCockpitScreen(
             }
           }
 
-          VirtualStickPad(
-            label = "ROLL / PITCH",
-            horizontalAxisLabel = "Roll",
-            verticalAxisLabel = "Pitch",
-            autoCenterY = true,
-            onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
-            onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-            size = stickSize,
-            hudOverlay = true,
-            tag = "right_stick_pad",
-          )
+          if (!caps.isVideoOnly) {
+            VirtualStickPad(
+              label = "ROLL / PITCH",
+              horizontalAxisLabel = "Roll",
+              verticalAxisLabel = "Pitch",
+              autoCenterY = true,
+              onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
+              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+              size = stickSize,
+              hudOverlay = true,
+              tag = "right_stick_pad",
+            )
+          }
         }
       } else {
         // Portrait Compact Overlay: Modifiers + Primary Flight Actions + Dual Translucent Sticks
@@ -654,12 +676,14 @@ fun FlightCockpitScreen(
             fastFly = fastFly,
             headlessMode = headlessMode,
             isConnected = isConnected,
+            activeCameraIndex = activeCameraIndex,
             trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
             modesActive = automationState.hasActiveAutomation || automationState.trajectoryDrawMode,
             onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
             onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
             onFlip360 = { dir -> viewModel.commandFlip360(dir.wireId) },
             onTiltCamera = { viewModel.tiltCamera(it) },
+            onSwitchCamera = { viewModel.switchCamera() },
             onCalibrateGyro = { viewModel.commandCalibrateGyro() },
             onOpenTrim = { showTrimDialog = true },
             onOpenFlightModes = { showFlightModesSheet = true },
@@ -681,34 +705,36 @@ fun FlightCockpitScreen(
             modifier = Modifier.fillMaxWidth().testTag("hud_actions_row"),
           )
 
-          Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Bottom,
-          ) {
-            VirtualStickPad(
-              label = "THR / YAW",
-              horizontalAxisLabel = "Yaw",
-              verticalAxisLabel = "Throttle",
-              autoCenterY = false,
-              onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
-              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-              size = stickSize,
-              hudOverlay = true,
-              tag = "left_stick_pad",
-            )
+          if (!caps.isVideoOnly) {
+            Row(
+              modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+              horizontalArrangement = Arrangement.SpaceBetween,
+              verticalAlignment = Alignment.Bottom,
+            ) {
+              VirtualStickPad(
+                label = "THR / YAW",
+                horizontalAxisLabel = "Yaw",
+                verticalAxisLabel = "Throttle",
+                autoCenterY = false,
+                onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
+                onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+                size = stickSize,
+                hudOverlay = true,
+                tag = "left_stick_pad",
+              )
 
-            VirtualStickPad(
-              label = "ROLL / PITCH",
-              horizontalAxisLabel = "Roll",
-              verticalAxisLabel = "Pitch",
-              autoCenterY = true,
-              onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
-              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-              size = stickSize,
-              hudOverlay = true,
-              tag = "right_stick_pad",
-            )
+              VirtualStickPad(
+                label = "ROLL / PITCH",
+                horizontalAxisLabel = "Roll",
+                verticalAxisLabel = "Pitch",
+                autoCenterY = true,
+                onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
+                onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+                size = stickSize,
+                hudOverlay = true,
+                tag = "right_stick_pad",
+              )
+            }
           }
         }
       }
@@ -808,7 +834,7 @@ fun FlightCockpitScreen(
               viewModel.toggleSpinner(SpinnerMode.ROTATION)
               showFlightModesSheet = false
             },
-            leadingIcon = { Icon(Icons.Default.RotateRight, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            leadingIcon = { Icon(Icons.AutoMirrored.Filled.RotateRight, contentDescription = null, modifier = Modifier.size(16.dp)) },
             label = { Text("Rot Spin") },
             modifier = Modifier.testTag("mode_rot_spinner_chip"),
           )
@@ -843,6 +869,7 @@ fun FlightCockpitScreen(
                   mirrorHorizontal = userPrefs.videoMirrorHorizontal,
                   mvFilterPreset = preset,
                   firmwareSdTriggerEnabled = userPrefs.firmwareSdTriggerEnabled,
+                  videoRotationAuto = userPrefs.videoRotationAuto,
                 )
               },
               label = { Text(preset.label) },
@@ -1212,12 +1239,14 @@ private fun HudCapabilityModifiersRow(
   fastFly: Boolean,
   headlessMode: Boolean,
   isConnected: Boolean,
+  activeCameraIndex: Int,
   trimActive: Boolean,
   modesActive: Boolean,
   onCycleSpeedTier: () -> Unit,
   onToggleHeadless: () -> Unit,
   onFlip360: (FlipDirection) -> Unit,
   onTiltCamera: (Int) -> Unit,
+  onSwitchCamera: () -> Unit,
   onCalibrateGyro: () -> Unit,
   onOpenTrim: () -> Unit,
   onOpenFlightModes: () -> Unit,
@@ -1343,6 +1372,16 @@ private fun HudCapabilityModifiersRow(
       }
     }
 
+    if (caps.supportsCameraSwitch) {
+      HudOverlayMiniButton(
+        label = "Cam $activeCameraIndex",
+        enabled = isConnected,
+        active = activeCameraIndex == 2,
+        onClick = onSwitchCamera,
+        tag = "camera_switch_chip",
+      )
+    }
+
     if (caps.supportsGyroCalibration) {
       HudOverlayMiniButton(
         label = "Gyro",
@@ -1352,14 +1391,16 @@ private fun HudCapabilityModifiersRow(
       )
     }
 
-    HudOverlayMiniButton(
-      label = "Trim",
-      active = trimActive,
-      onClick = onOpenTrim,
-      icon = Icons.Default.Tune,
-      tag = "trim_button",
-      activeColor = theme.colors.accent,
-    )
+    if (!caps.isVideoOnly) {
+      HudOverlayMiniButton(
+        label = "Trim",
+        active = trimActive,
+        onClick = onOpenTrim,
+        icon = Icons.Default.Tune,
+        tag = "trim_button",
+        activeColor = theme.colors.accent,
+      )
+    }
 
     HudOverlayMiniButton(
       label = "Mode",
@@ -1436,6 +1477,28 @@ private fun HudPrimaryActionsRow(
   modifier: Modifier = Modifier,
 ) {
   val theme = LocalResolvedTheme.current
+  if (caps.isVideoOnly) {
+    HudTranslucentPill(
+      modifier = modifier,
+    ) {
+      Box(
+        contentAlignment = Alignment.Center,
+        modifier =
+          Modifier.fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag("video_only_banner"),
+      ) {
+        Text(
+          text = "Video-Only Profile (Flight Commands Disabled)",
+          style = MaterialTheme.typography.labelMedium,
+          color = theme.colors.statusWarning,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
+    return
+  }
   Row(
     modifier = modifier,
     horizontalArrangement = Arrangement.spacedBy(6.dp),

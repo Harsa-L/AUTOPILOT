@@ -127,6 +127,13 @@ class NativeDroneProtocolAdapter(
       _connectionState.value = ConnectionState.Disconnected
     }
 
+  override fun setControlArmed(armed: Boolean) {
+    val handle = nativeHandle.get()
+    if (handle != 0L && AutopilotNativeBridge.isNativeLoaded) {
+      AutopilotNativeBridge.nativeSetControlArmed(handle, armed)
+    }
+  }
+
   override suspend fun sendCommand(command: FlightCommand) {
     val handle = nativeHandle.get()
     if (handle == 0L || !AutopilotNativeBridge.isNativeLoaded) return
@@ -250,6 +257,11 @@ class NativeDroneProtocolAdapter(
           )
         }
       }
+      is FlightCommand.SwitchCamera -> {
+        if (capabilities.supportsCameraSwitch) {
+          AutopilotNativeBridge.nativeSwitchCamera(handle, command.cameraIndex)
+        }
+      }
       FlightCommand.RequestKeyframe -> {
         AutopilotNativeBridge.nativeRequestKeyframe(handle)
       }
@@ -285,6 +297,10 @@ class NativeDroneProtocolAdapter(
                 lastCommandHex = hex,
                 isSyntheticHarness = counters.isSynthetic,
                 firmwareStatusFlags = counters.firmwareStatusFlags,
+                controlPacketsReceived = counters.controlPacketsReceived,
+                videoPacketsReceived = counters.videoPacketsReceived,
+                controlArmed = counters.controlArmed,
+                lastSocketErrno = counters.lastSocketErrno,
               )
             )
             if (!counters.running && _connectionState.value is ConnectionState.Connected) {
@@ -391,30 +407,127 @@ object ProtocolPacketEncoder {
           )
           .also { it[9] = ByteFraming.xorChecksum(it, 2, 9) }
 
-      ProtocolFamily.WIFI_UAV,
-      ProtocolFamily.COOINGDV ->
+      ProtocolFamily.WIFI_UAV ->
         byteArrayOf(0x66.toByte(), r, p, t, y, f, 0x00, 0x99.toByte()).also {
           it[6] = ByteFraming.xorChecksum(it, 1, 6)
         }
 
-      ProtocolFamily.COOINGDV_JIELI ->
+      ProtocolFamily.COOINGDV -> {
+        val b1 = floatToCooingdvAxis(roll)
+        val b2 = floatToCooingdvAxis(pitch)
+        var acc = floatToCooingdvAxis(throttle)
+        if (acc == 1) acc = 0
+        val turn = floatToCooingdvAxis(yaw)
+        val tcFlags = mapCooingdvTcFlags(actionFlags)
         byteArrayOf(
-            'C'.code.toByte(),
-            'T'.code.toByte(),
-            'P'.code.toByte(),
-            ':'.code.toByte(),
-            0x00,
-            0x08,
+            0x03,
             0x66.toByte(),
-            r,
-            p,
-            t,
-            y,
-            f,
+            b1.toByte(),
+            b2.toByte(),
+            acc.toByte(),
+            turn.toByte(),
+            tcFlags,
             0x00,
             0x99.toByte(),
           )
-          .also { it[12] = ByteFraming.xorChecksum(it, 7, 12) }
+          .also { it[7] = ByteFraming.xorChecksum(it, 2, 7) }
+      }
+
+      ProtocolFamily.COOINGDV_GL -> {
+        val b1 = floatToCooingdvAxis(roll)
+        val b2 = floatToCooingdvAxis(pitch)
+        var acc = floatToCooingdvAxis(throttle)
+        if (acc == 1) acc = 0
+        val turn = floatToCooingdvAxis(yaw)
+        var flags1 = 0
+        if ((actionFlags and (NativeActionFlags.TAKEOFF or NativeActionFlags.CONTROLLED_LAND)) != 0) {
+          flags1 = flags1 or 0x01
+        }
+        if ((actionFlags and (NativeActionFlags.EMERGENCY_STOP or NativeActionFlags.MOTOR_STOP)) != 0) {
+          flags1 = flags1 or 0x02
+        }
+        if ((actionFlags and NativeActionFlags.CALIBRATE_GYRO) != 0) flags1 = flags1 or 0x04
+        if ((actionFlags and NativeActionFlags.FLIP_360) != 0) flags1 = flags1 or 0x08
+        val flags2 = if ((actionFlags and NativeActionFlags.HEADLESS) != 0) 0x01 else 0x00
+        ByteArray(21).also {
+          it[0] = 0x03
+          it[1] = 0x66.toByte()
+          it[2] = 0x14
+          it[3] = b1.toByte()
+          it[4] = b2.toByte()
+          it[5] = acc.toByte()
+          it[6] = turn.toByte()
+          it[7] = flags1.toByte()
+          it[8] = flags2.toByte()
+          it[19] = ByteFraming.xorChecksum(it, 3, 19)
+          it[20] = 0x99.toByte()
+        }
+      }
+
+      ProtocolFamily.FLOW_KY_Y_SERIES -> {
+        val scale =
+          when (effectiveSpeed) {
+            0 -> 0.30f
+            1 -> 0.60f
+            else -> 1.00f
+          }
+        val b1 = floatToCooingdvAxis(roll * scale)
+        val b2 = floatToCooingdvAxis(pitch * scale)
+        var acc = floatToCooingdvAxis(throttle * scale)
+        if (acc == 1) acc = 0
+        val turn = floatToCooingdvAxis(yaw * scale)
+        val cmd =
+          when {
+            (actionFlags and (NativeActionFlags.EMERGENCY_STOP or NativeActionFlags.MOTOR_STOP)) != 0 -> 0x02
+            (actionFlags and (NativeActionFlags.TAKEOFF or NativeActionFlags.CONTROLLED_LAND)) != 0 -> 0x01
+            (actionFlags and NativeActionFlags.CALIBRATE_GYRO) != 0 -> 0x03
+            (actionFlags and NativeActionFlags.FLIP_360) != 0 -> 0x05
+            (actionFlags and NativeActionFlags.HEADLESS) != 0 -> 0x04
+            else -> 0x00
+          }
+        ByteArray(21).also {
+          it[0] = 0x03
+          it[1] = 0x66.toByte()
+          it[2] = 0x14
+          it[3] = b1.toByte()
+          it[4] = b2.toByte()
+          it[5] = acc.toByte()
+          it[6] = turn.toByte()
+          it[7] = cmd.toByte()
+          it[8] = 0x02
+          it[19] = ByteFraming.xorChecksum(it, 3, 19)
+          it[20] = 0x99.toByte()
+        }
+      }
+
+      ProtocolFamily.COOINGDV_JIELI -> {
+        val b1 = floatToCooingdvAxis(roll)
+        val b2 = floatToCooingdvAxis(pitch)
+        var acc = floatToCooingdvAxis(throttle)
+        if (acc == 1) acc = 0
+        val turn = floatToCooingdvAxis(yaw)
+        val tcFlags = mapCooingdvTcFlags(actionFlags).toInt() and 0xFF
+        val chk = b1 xor b2 xor acc xor turn xor tcFlags
+        val topic = "FLYING_CTRL".encodeToByteArray()
+        val json =
+          """{"op":"PUT","param":{"BYTE0":"102","BYTE1":"$b1","BYTE2":"$b2","BYTE3":"$acc","BYTE4":"$turn","BYTE5":"$tcFlags","BYTE6":"$chk","BYTE7":"153"}}"""
+            .encodeToByteArray()
+        ByteArray(4 + 2 + topic.size + 4 + json.size).also { out ->
+          out[0] = 'C'.code.toByte()
+          out[1] = 'T'.code.toByte()
+          out[2] = 'P'.code.toByte()
+          out[3] = ':'.code.toByte()
+          out[4] = (topic.size and 0xFF).toByte()
+          out[5] = ((topic.size ushr 8) and 0xFF).toByte()
+          topic.copyInto(out, 6)
+          val jOff = 6 + topic.size
+          out[jOff] = (json.size and 0xFF).toByte()
+          out[jOff + 1] = ((json.size ushr 8) and 0xFF).toByte()
+          out[jOff + 2] = ((json.size ushr 16) and 0xFF).toByte()
+          out[jOff + 3] = ((json.size ushr 24) and 0xFF).toByte()
+          json.copyInto(out, jOff + 4)
+        }
+      }
 
       ProtocolFamily.WIFI_CAM ->
         byteArrayOf(0xFF.toByte(), 0x08, r, p, t, y, f, 0x00).also {
@@ -422,19 +535,27 @@ object ProtocolPacketEncoder {
         }
 
       ProtocolFamily.X69_LG ->
-        byteArrayOf(
-            0x66.toByte(),
-            r,
-            p,
-            t,
-            y,
-            f,
-            effectiveSpeed.toByte(),
-            cameraTilt.toByte(),
-            0x00,
-            0x99.toByte(),
-          )
-          .also { it[8] = ByteFraming.xorChecksum(it, 1, 8) }
+        ByteArray(25).also {
+          it[0] = 0xCA.toByte()
+          it[1] = 0x47.toByte()
+          it[2] = 0xD5.toByte()
+          it[3] = 0x00
+          it[4] = 0x14
+          it[5] = 0x66.toByte()
+          it[6] = r
+          it[7] = p
+          it[8] = t
+          it[9] = y
+          it[10] = f
+          it[11] = effectiveSpeed.toByte()
+          it[12] = cameraTilt.toByte()
+          it[23] = ByteFraming.xorChecksum(it, 6, 23)
+          it[24] = 0x99.toByte()
+        }
+
+      ProtocolFamily.FLOW_BL60X,
+      ProtocolFamily.JIELI_AC79,
+      ProtocolFamily.LEWEI -> ByteArray(0)
 
       ProtocolFamily.ISOLATED_TEST_HARNESS ->
         byteArrayOf(
@@ -456,6 +577,25 @@ object ProtocolPacketEncoder {
   private fun axisToByte(v: Float): Byte {
     val clamped = v.coerceIn(-1f, 1f)
     return (((clamped + 1f) * 127.5f).roundToInt().coerceIn(0, 255)).toByte()
+  }
+
+  private fun floatToCooingdvAxis(v: Float): Int {
+    val clamped = v.coerceIn(-1f, 1f)
+    return (128f + clamped * 127f).roundToInt().coerceIn(1, 255)
+  }
+
+  private fun mapCooingdvTcFlags(actionFlags: Int): Byte {
+    var out = 0
+    if ((actionFlags and NativeActionFlags.TAKEOFF) != 0) out = out or 0x01
+    if ((actionFlags and NativeActionFlags.CONTROLLED_LAND) != 0) out = out or 0x02
+    if ((actionFlags and (NativeActionFlags.EMERGENCY_STOP or NativeActionFlags.MOTOR_STOP)) != 0) {
+      out = out or 0x04
+    }
+    if ((actionFlags and NativeActionFlags.FLIP_360) != 0) out = out or 0x08
+    if ((actionFlags and NativeActionFlags.HEADLESS) != 0) out = out or 0x10
+    if ((actionFlags and NativeActionFlags.UNLOCK_MOTORS) != 0) out = out or 0x20
+    if ((actionFlags and NativeActionFlags.CALIBRATE_GYRO) != 0) out = out or 0x80
+    return out.toByte()
   }
 
   private fun mapFlags(actionFlags: Int): Byte {
@@ -482,6 +622,8 @@ private fun VideoTransportType.toNativeKind(): Int =
     VideoTransportType.RAW_UDP_H265 -> 5
     VideoTransportType.SYNTHETIC_TEST_PATTERN -> 6
     VideoTransportType.RTSP_H265 -> 7
+    VideoTransportType.RTSP_MJPEG -> 8
+    VideoTransportType.LEWEI_TCP_H264 -> 9
   }
 
 private fun Int.toVideoTransportType(): VideoTransportType =
@@ -493,5 +635,7 @@ private fun Int.toVideoTransportType(): VideoTransportType =
     5 -> VideoTransportType.RAW_UDP_H265
     6 -> VideoTransportType.SYNTHETIC_TEST_PATTERN
     7 -> VideoTransportType.RTSP_H265
+    8 -> VideoTransportType.RTSP_MJPEG
+    9 -> VideoTransportType.LEWEI_TCP_H264
     else -> VideoTransportType.NONE
   }

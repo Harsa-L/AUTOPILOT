@@ -128,15 +128,19 @@ class FlightStateControllerTest {
   fun `soft descent assist transmits negative throttle taper and firmware SD triggers dispatch cleanly`() = runTest {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     val controller = FlightStateController(scope)
-    val entry = ProtocolCompatibilityRegistry.findById("cooingdv")!!
-    val fake = FakeContractProtocol(entry.descriptor, entry.capabilities)
+    val s2xEntry = ProtocolCompatibilityRegistry.findById("s2x")!!
+    val s2xFake = FakeContractProtocol(s2xEntry.descriptor, s2xEntry.capabilities)
 
-    controller.connectProtocol(fake, ConnectionConfig("192.168.1.1", 7099, 7070, 7099))
+    controller.connectProtocol(s2xFake, ConnectionConfig("192.168.0.1", 40000, 40000, null))
     controller.triggerFirmwarePhoto()
     controller.setFirmwareRecord(true)
-    assertTrue(fake.recordedCommands.contains(FlightCommand.TriggerFirmwarePhoto))
-    assertTrue(fake.recordedCommands.contains(FlightCommand.TriggerFirmwareRecord(true)))
+    assertTrue(s2xFake.recordedCommands.contains(FlightCommand.TriggerFirmwarePhoto))
+    assertTrue(s2xFake.recordedCommands.contains(FlightCommand.TriggerFirmwareRecord(true)))
+    controller.disconnect()
 
+    val entry = ProtocolCompatibilityRegistry.findById("cooingdv")!!
+    val fake = FakeContractProtocol(entry.descriptor, entry.capabilities)
+    controller.connectProtocol(fake, ConnectionConfig("192.168.1.1", 7099, 7070, 7099))
     assertTrue(controller.arm())
     assertTrue(controller.takeoff())
     fake.recordedCommands.clear()
@@ -147,6 +151,32 @@ class FlightStateControllerTest {
     )
     assertEquals(FlightState.Ready, controller.flightState.value)
 
+    assertTrue(controller.switchCamera(2))
+    assertTrue(fake.recordedCommands.contains(FlightCommand.SwitchCamera(2)))
+
+    controller.disconnect()
+  }
+
+  @Test
+  fun `video-only profiles block arm, takeoff, land, stop, emergency stop, and stick transmission`() = runTest {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    val controller = FlightStateController(scope)
+    val entry = ProtocolCompatibilityRegistry.findById("flow_bl60x")!!
+    val fake = FakeContractProtocol(entry.descriptor, entry.capabilities)
+
+    controller.connectProtocol(fake, ConnectionConfig("192.168.169.1", 8800, 8800, 8800))
+    assertEquals(FlightState.Ready, controller.flightState.value)
+
+    assertFalse(controller.arm())
+    assertFalse(controller.unlockMotors())
+    assertFalse(controller.takeoff())
+    assertFalse(controller.controlledLand())
+    assertFalse(controller.motorStop())
+    controller.emergencyStop()
+    controller.sendStickInput(0.5f, 0.5f, 0.5f, 0.5f)
+
+    assertEquals(FlightState.Ready, controller.flightState.value)
+    assertTrue(fake.recordedCommands.isEmpty())
     controller.disconnect()
   }
 }

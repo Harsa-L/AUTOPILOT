@@ -94,8 +94,40 @@ class WifiConnectivityController(private val context: Context) {
   }
 
   fun requestDroneApBinding(ssidPrefix: String, onResult: (Long?) -> Unit) {
+    requestDroneApBinding(listOf(ssidPrefix), preferredSsid = null, onResult = onResult)
+  }
+
+  fun requestDroneApBinding(
+    ssidPrefixes: List<String>,
+    preferredSsid: String? = null,
+    onResult: (Long?) -> Unit,
+  ) {
+    val cleanPrefixes = ssidPrefixes.map { it.trim() }.filter { it.isNotEmpty() }
+    val current = refreshCurrentWifiState()
+    val currentSsid = current.ssid
+    val alreadyMatchingCurrent =
+      current.boundNetworkHandle != null &&
+        currentSsid != null &&
+        ((preferredSsid != null && currentSsid.equals(preferredSsid, ignoreCase = true)) ||
+          cleanPrefixes.any { prefix -> currentSsid.startsWith(prefix, ignoreCase = true) })
+
+    if (alreadyMatchingCurrent) {
+      findActiveWifiNetwork()?.let { net ->
+        runCatching { connectivityManager.bindProcessToNetwork(net) }
+      }
+      _linkState.value =
+        _linkState.value.copy(
+          statusMessage = "Using already-connected drone AP ($currentSsid)"
+        )
+      AutopilotLog.info(
+        SubsystemTag.CONNECTIVITY,
+        "Bound active Wi-Fi handle=${current.boundNetworkHandle} ($currentSsid)",
+      )
+      onResult(current.boundNetworkHandle)
+      return
+    }
+
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-      val current = refreshCurrentWifiState()
       AutopilotLog.info(
         SubsystemTag.CONNECTIVITY,
         "API < 29: using active Wi-Fi handle=${current.boundNetworkHandle}",
@@ -104,19 +136,31 @@ class WifiConnectivityController(private val context: Context) {
       return
     }
 
+    val targetPattern =
+      preferredSsid?.takeIf { it.isNotBlank() }
+        ?: cleanPrefixes.firstOrNull()
+        ?: ""
+    if (targetPattern.isEmpty()) {
+      onResult(current.boundNetworkHandle)
+      return
+    }
+
     releaseBinding()
-    val specifier =
-      WifiNetworkSpecifier.Builder()
-        .setSsidPattern(PatternMatcher(ssidPrefix, PatternMatcher.PATTERN_PREFIX))
-        .build()
+    val specifierBuilder = WifiNetworkSpecifier.Builder()
+    if (preferredSsid != null && preferredSsid.isNotBlank()) {
+      specifierBuilder.setSsid(preferredSsid)
+    } else {
+      specifierBuilder.setSsidPattern(PatternMatcher(targetPattern, PatternMatcher.PATTERN_PREFIX))
+    }
 
     val request =
       NetworkRequest.Builder()
         .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
         .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        .setNetworkSpecifier(specifier)
+        .setNetworkSpecifier(specifierBuilder.build())
         .build()
 
+    val displayHint = preferredSsid ?: "$targetPattern*"
     val callback =
       object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -126,9 +170,9 @@ class WifiConnectivityController(private val context: Context) {
             _linkState.value.copy(
               isWifiConnected = true,
               boundNetworkHandle = handle,
-              statusMessage = "Bound process & native sockets to drone AP ($ssidPrefix*)",
+              statusMessage = "Bound process & native sockets to drone AP ($displayHint)",
             )
-          AutopilotLog.info(SubsystemTag.CONNECTIVITY, "Bound network handle=$handle ($ssidPrefix*)")
+          AutopilotLog.info(SubsystemTag.CONNECTIVITY, "Bound network handle=$handle ($displayHint)")
           onResult(handle)
         }
 
@@ -137,9 +181,9 @@ class WifiConnectivityController(private val context: Context) {
             _linkState.value.copy(
               isWifiConnected = false,
               boundNetworkHandle = null,
-              statusMessage = "Drone AP ($ssidPrefix*) unavailable or request declined.",
+              statusMessage = "Drone AP ($displayHint) unavailable or request declined.",
             )
-          AutopilotLog.warn(SubsystemTag.CONNECTIVITY, "WifiNetworkSpecifier unavailable for $ssidPrefix")
+          AutopilotLog.warn(SubsystemTag.CONNECTIVITY, "WifiNetworkSpecifier unavailable for $displayHint")
           onResult(null)
         }
 

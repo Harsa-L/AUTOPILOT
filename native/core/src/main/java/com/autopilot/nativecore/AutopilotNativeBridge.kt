@@ -28,6 +28,10 @@ data class NativeSessionCounters(
   val lastRxTimestampMs: Long,
   val batteryPercent: Int? = null,
   val firmwareStatusFlags: Int? = null,
+  val controlPacketsReceived: Long = 0L,
+  val videoPacketsReceived: Long = 0L,
+  val controlArmed: Boolean = false,
+  val lastSocketErrno: Int = 0,
 )
 
 data class NativeVideoFrameMeta(
@@ -93,6 +97,10 @@ object AutopilotNativeBridge {
       lastRxTimestampMs = arr[6],
       batteryPercent = batteryRaw.takeIf { it in 0..100 },
       firmwareStatusFlags = statusRaw.takeIf { it >= 0 },
+      controlPacketsReceived = if (arr.size > 9) arr[9] else 0L,
+      videoPacketsReceived = if (arr.size > 10) arr[10] else 0L,
+      controlArmed = if (arr.size > 11) arr[11] != 0L else false,
+      lastSocketErrno = if (arr.size > 12) arr[12].toInt() else 0,
     )
   }
 
@@ -136,6 +144,10 @@ object AutopilotNativeBridge {
   external fun nativeStopSession(handle: Long)
 
   external fun nativeDestroySession(handle: Long)
+
+  external fun nativeSetControlArmed(handle: Long, armed: Boolean)
+
+  external fun nativeSwitchCamera(handle: Long, cameraIndex: Int)
 
   external fun nativeUpdateSticks(
     handle: Long,
