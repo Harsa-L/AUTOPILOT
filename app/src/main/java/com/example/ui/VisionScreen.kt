@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -49,6 +50,7 @@ import com.autopilot.vision.DetectorAvailability
 fun VisionScreen(
   viewModel: AutopilotViewModel,
   onNavigateBack: () -> Unit,
+  onOpenBenchmarkStudio: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val theme = LocalResolvedTheme.current
@@ -235,6 +237,40 @@ fun VisionScreen(
             tone = AutopilotButtonTone.SECONDARY,
             modifier = Modifier.fillMaxWidth(),
             tag = "import_yolo_model_button",
+          )
+        }
+      }
+
+      item {
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+              Text(
+                text = "Vision Benchmark Studio",
+                style = MaterialTheme.typography.titleMedium,
+                color = theme.colors.textPrimary,
+              )
+              Text(
+                text =
+                  "Test LiteRT YOLO models offline using your phone camera with configurable video degradation, telemetry, and triple MP4 capture. Completely isolated from flight control.",
+                style = MaterialTheme.typography.bodySmall,
+                color = theme.colors.textSecondary,
+              )
+            }
+            StatusBadge(label = "ISOLATED", tone = StatusTone.INFO)
+          }
+          Spacer(Modifier.height(12.dp))
+          AutopilotButton(
+            text = "Open Vision Benchmark Studio",
+            onClick = onOpenBenchmarkStudio,
+            icon = Icons.Default.Science,
+            tone = AutopilotButtonTone.PRIMARY,
+            modifier = Modifier.fillMaxWidth(),
+            tag = "open_vision_benchmark_button",
           )
         }
       }

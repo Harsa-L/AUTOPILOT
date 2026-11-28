@@ -12,6 +12,7 @@ add_library(
     communication/native_session.cpp
     processing/video_reassembler.cpp
     algorithms/vision_engine.cpp
+    benchmark/video_degrader.cpp
     jni/autopilot_jni.cpp
 )
 

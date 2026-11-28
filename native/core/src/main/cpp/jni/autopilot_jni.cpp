@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "algorithms/vision_engine.hpp"
+#include "benchmark/video_degrader.hpp"
 #include "communication/native_session.hpp"
 #include "protocol/protocol_packets.hpp"
 
@@ -371,6 +372,117 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeProcessVisionFrame(
   jfloatArray result = env->NewFloatArray(static_cast<jsize>(total_floats));
   env->SetFloatArrayRegion(result, 0, static_cast<jsize>(total_floats), packed.data());
   return result;
+}
+
+namespace {
+autopilot::benchmark::DegradeParams unpack_degrade_params(const jfloat* f, jsize flen,
+                                                          const jint* iv, jsize ilen) {
+  autopilot::benchmark::DegradeParams p;
+  if (iv && ilen >= 6) {
+    p.target_width = iv[0];
+    p.target_height = iv[1];
+    p.aspect_mode = iv[2];
+    p.pixelation_block = iv[3];
+    p.dynamic_range_bits = iv[4];
+    p.chroma_subsample = iv[5];
+    if (ilen >= 7) {
+      p.frame_seed = static_cast<uint32_t>(iv[6]);
+    }
+  }
+  if (f && flen >= 12) {
+    p.crop_zoom = f[0];
+    p.gaussian_blur = f[1];
+    p.motion_blur_px = f[2];
+    p.motion_blur_angle_deg = f[3];
+    p.noise_strength = f[4];
+    p.sharpen_amount = f[5];
+    p.contrast = f[6];
+    p.brightness = f[7];
+    p.saturation = f[8];
+    p.color_distortion = f[9];
+    p.exposure_ev = f[10];
+    p.block_artifact_strength = f[11];
+  }
+  return p;
+}
+}  // namespace
+
+JNIEXPORT jlong JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeCreateDegraderEngine(JNIEnv* /* env */,
+                                                                               jobject /* thiz */) {
+  return reinterpret_cast<jlong>(new autopilot::benchmark::NativeVideoDegrader());
+}
+
+JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeDestroyDegraderEngine(
+    JNIEnv* /* env */, jobject /* thiz */, jlong handle) {
+  auto* engine = reinterpret_cast<autopilot::benchmark::NativeVideoDegrader*>(handle);
+  delete engine;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeDegradeYuv420(
+    JNIEnv* env, jobject /* thiz */, jlong handle,
+    jobject y_buf, jint y_stride, jobject u_buf, jint u_stride, jint u_pix_stride,
+    jobject v_buf, jint v_stride, jint v_pix_stride,
+    jint src_w, jint src_h, jint rotation_deg, jboolean mirror_h,
+    jobject out_clean_buf, jint clean_w, jint clean_h,
+    jobject out_degraded_buf, jintArray int_params, jfloatArray float_params) {
+  auto* engine = reinterpret_cast<autopilot::benchmark::NativeVideoDegrader*>(handle);
+  if (!engine || !y_buf || !u_buf || !v_buf || !out_degraded_buf) return 0L;
+
+  const auto* y_ptr = reinterpret_cast<const uint8_t*>(env->GetDirectBufferAddress(y_buf));
+  const auto* u_ptr = reinterpret_cast<const uint8_t*>(env->GetDirectBufferAddress(u_buf));
+  const auto* v_ptr = reinterpret_cast<const uint8_t*>(env->GetDirectBufferAddress(v_buf));
+  const jlong y_cap = env->GetDirectBufferCapacity(y_buf);
+  const jlong u_cap = env->GetDirectBufferCapacity(u_buf);
+  const jlong v_cap = env->GetDirectBufferCapacity(v_buf);
+
+  auto* clean_ptr = out_clean_buf
+                        ? reinterpret_cast<uint8_t*>(env->GetDirectBufferAddress(out_clean_buf))
+                        : nullptr;
+  auto* deg_ptr = reinterpret_cast<uint8_t*>(env->GetDirectBufferAddress(out_degraded_buf));
+  if (!y_ptr || !u_ptr || !v_ptr || !deg_ptr) return 0L;
+
+  jint* iv = int_params ? env->GetIntArrayElements(int_params, nullptr) : nullptr;
+  jfloat* fv = float_params ? env->GetFloatArrayElements(float_params, nullptr) : nullptr;
+  const jsize ilen = int_params ? env->GetArrayLength(int_params) : 0;
+  const jsize flen = float_params ? env->GetArrayLength(float_params) : 0;
+  const auto params = unpack_degrade_params(fv, flen, iv, ilen);
+
+  const int64_t elapsed_ns = engine->process_yuv420_to_rgba(
+      y_ptr, y_cap, y_stride, u_ptr, u_cap, u_stride, u_pix_stride,
+      v_ptr, v_cap, v_stride, v_pix_stride, src_w, src_h, rotation_deg,
+      mirror_h == JNI_TRUE, clean_ptr, clean_w, clean_h, deg_ptr, params);
+
+  if (iv) env->ReleaseIntArrayElements(int_params, iv, JNI_ABORT);
+  if (fv) env->ReleaseFloatArrayElements(float_params, fv, JNI_ABORT);
+  return static_cast<jlong>(elapsed_ns);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeDegradeRgba(
+    JNIEnv* env, jobject /* thiz */, jlong handle,
+    jobject src_rgba_buf, jint src_w, jint src_h,
+    jobject out_degraded_buf, jintArray int_params, jfloatArray float_params) {
+  auto* engine = reinterpret_cast<autopilot::benchmark::NativeVideoDegrader*>(handle);
+  if (!engine || !src_rgba_buf || !out_degraded_buf) return 0L;
+
+  const auto* src_ptr = reinterpret_cast<const uint8_t*>(env->GetDirectBufferAddress(src_rgba_buf));
+  auto* deg_ptr = reinterpret_cast<uint8_t*>(env->GetDirectBufferAddress(out_degraded_buf));
+  if (!src_ptr || !deg_ptr) return 0L;
+
+  jint* iv = int_params ? env->GetIntArrayElements(int_params, nullptr) : nullptr;
+  jfloat* fv = float_params ? env->GetFloatArrayElements(float_params, nullptr) : nullptr;
+  const jsize ilen = int_params ? env->GetArrayLength(int_params) : 0;
+  const jsize flen = float_params ? env->GetArrayLength(float_params) : 0;
+  const auto params = unpack_degrade_params(fv, flen, iv, ilen);
+
+  const int64_t elapsed_ns = engine->process_rgba_to_rgba(src_ptr, src_w, src_h, deg_ptr, params);
+
+  if (iv) env->ReleaseIntArrayElements(int_params, iv, JNI_ABORT);
+  if (fv) env->ReleaseFloatArrayElements(float_params, fv, JNI_ABORT);
+  return static_cast<jlong>(elapsed_ns);
 }
 
 }  // extern "C"

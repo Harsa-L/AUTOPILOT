@@ -98,6 +98,7 @@ dependencies {
   implementation(project(":flight:control"))
   implementation(project(":video"))
   implementation(project(":vision"))
+  implementation(project(":vision-benchmark"))
 
   implementation(enforcedPlatform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)

@@ -77,6 +77,7 @@ class Mp4FrameRecorder {
   private var encoder: MediaCodec? = null
   private var inputSurface: Surface? = null
   private var muxer: MediaMuxer? = null
+  private var pendingOutputFormat: MediaFormat? = null
   private var trackIndex = -1
   private var muxerStarted = false
   private var pendingUri: Uri? = null
@@ -84,6 +85,7 @@ class Mp4FrameRecorder {
   private var displayName: String = ""
   private var startedAtMs: Long = 0L
   private var recordedFrames: Long = 0L
+  private var samplesWritten: Long = 0L
   private var width = 0
   private var height = 0
 
@@ -104,6 +106,8 @@ class Mp4FrameRecorder {
     width = alignedW
     height = alignedH
     recordedFrames = 0L
+    samplesWritten = 0L
+    pendingOutputFormat = null
     trackIndex = -1
     muxerStarted = false
     startedAtMs = System.currentTimeMillis()
@@ -191,11 +195,13 @@ class Mp4FrameRecorder {
         frameCount = recordedFrames,
         durationSec = durationSec(),
       )
-    runCatching {
-      mc.signalEndOfInputStream()
-      drainEncoder(mc, endOfStream = true)
+    if (recordedFrames > 0L) {
+      runCatching {
+        mc.signalEndOfInputStream()
+        drainEncoder(mc, endOfStream = true)
+      }
     }
-    cleanupResources(context, finalizeUri = recordedFrames > 0L)
+    cleanupResources(context, finalizeUri = samplesWritten > 0L)
     AutopilotLog.info(SubsystemTag.VIDEO, "Stopped MP4 recording ${summary.displayName} (${summary.frameCount} frames)")
     return summary
   }
@@ -203,27 +209,36 @@ class Mp4FrameRecorder {
   private fun drainEncoder(mc: MediaCodec, endOfStream: Boolean) {
     val info = MediaCodec.BufferInfo()
     val timeoutUs = if (endOfStream) 10_000L else 0L
+    val eosDeadlineNs = System.nanoTime() + 500_000_000L
+    var emptyEosPolls = 0
     while (true) {
       val outIdx = mc.dequeueOutputBuffer(info, timeoutUs)
       when {
         outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
           if (!endOfStream) break
-          break
+          emptyEosPolls++
+          if (System.nanoTime() >= eosDeadlineNs || emptyEosPolls >= 20) break
         }
         outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-          val m = muxer ?: continue
-          if (!muxerStarted) {
-            trackIndex = m.addTrack(mc.outputFormat)
-            m.start()
-            muxerStarted = true
-          }
+          pendingOutputFormat = mc.outputFormat
         }
         outIdx >= 0 -> {
+          emptyEosPolls = 0
           val encoded = mc.getOutputBuffer(outIdx)
-          if (encoded != null && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && info.size > 0 && muxerStarted && trackIndex >= 0) {
-            encoded.position(info.offset)
-            encoded.limit(info.offset + info.size)
-            muxer?.writeSampleData(trackIndex, encoded, info)
+          if (encoded != null && (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && info.size > 0) {
+            val m = muxer
+            if (m != null && !muxerStarted) {
+              val fmt = pendingOutputFormat ?: mc.outputFormat
+              trackIndex = m.addTrack(fmt)
+              m.start()
+              muxerStarted = true
+            }
+            if (muxerStarted && trackIndex >= 0) {
+              encoded.position(info.offset)
+              encoded.limit(info.offset + info.size)
+              m?.writeSampleData(trackIndex, encoded, info)
+              samplesWritten++
+            }
           }
           mc.releaseOutputBuffer(outIdx, false)
           if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
@@ -238,11 +253,12 @@ class Mp4FrameRecorder {
     encoder = null
     runCatching { inputSurface?.release() }
     inputSurface = null
-    if (muxerStarted) {
+    if (muxerStarted && samplesWritten > 0L) {
       runCatching { muxer?.stop() }
     }
     runCatching { muxer?.release() }
     muxer = null
+    pendingOutputFormat = null
     muxerStarted = false
     trackIndex = -1
 

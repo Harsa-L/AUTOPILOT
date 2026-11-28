@@ -8,6 +8,8 @@ sealed interface AutopilotRoute {
 
   @Serializable data object Vision : AutopilotRoute
 
+  @Serializable data object VisionBenchmark : AutopilotRoute
+
   @Serializable data object Settings : AutopilotRoute
 
   @Serializable data object SettingsAircraft : AutopilotRoute

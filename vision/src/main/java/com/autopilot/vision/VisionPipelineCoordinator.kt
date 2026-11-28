@@ -16,34 +16,66 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/**
+ * Isolated frame-input adapter boundary for feeding frames into AUTOPILOT's
+ * production CV pipeline (LiteRT + C++20 NativeVisionEngine) without touching
+ * flight control or sharing mutable session state.
+ */
+interface VisionFrameInputAdapter : AutoCloseable {
+  val latestResult: StateFlow<VisionFrameResult?>
+  val availability: StateFlow<DetectorAvailability>
+  val calibration: StateFlow<CameraCalibrationConfig>
+
+  fun initializeAsync()
+  fun setEnabled(active: Boolean)
+  fun updateCalibration(focalLengthPx: Float, isCalibrated: Boolean)
+  fun updateConfidenceThreshold(threshold: Float)
+  fun selectModel(spec: VisionModelSpec?, preferGpu: Boolean = true)
+  fun submitFrame(bitmap: Bitmap, isSynthetic: Boolean)
+  suspend fun processFrameSynchronously(
+    bitmap: Bitmap,
+    isSynthetic: Boolean,
+    frameTimestampUs: Long = 0L,
+  ): VisionFrameResult
+}
 
 /**
  * Coordinates the bounded-queue vision pipeline on a dedicated single-thread dispatcher.
- * Combines framework-independent ObjectDetector (YOLO26n on LiteRT) with the C++20
+ * Combines framework-independent ObjectDetector (LiteRT YOLO26n/26s/11n) with the C++20
  * NativeVisionEngine (Lucas-Kanade optical flow, multi-object tracking, monocular depth).
+ *
+ * Each instance owns an isolated native handle, detector, dispatcher, and state flows so
+ * production flight CV and Vision Benchmark Studio sessions never share mutable state.
  */
 class VisionPipelineCoordinator(
   context: Context,
   private val dispatchers: AutopilotDispatchers,
-  private val preferGpu: Boolean = true,
-) : AutoCloseable {
+  preferGpu: Boolean = true,
+  initialModelSpec: VisionModelSpec? = null,
+  private val sessionName: String = "production",
+) : VisionFrameInputAdapter {
 
-  private val detector = LiteRtYolo26Detector(context, preferGpu)
+  private val detector = LiteRtYolo26Detector(context, preferGpu, initialModelSpec)
   private val visionDispatcher: CloseableDispatcher =
-    dispatchers.newSingleThreadVisionDispatcher("autopilot-litert-vision")
+    dispatchers.newSingleThreadVisionDispatcher("autopilot-litert-$sessionName")
   private val visionScope = CoroutineScope(visionDispatcher.dispatcher)
 
   private val _latestResult = MutableStateFlow<VisionFrameResult?>(null)
-  val latestResult: StateFlow<VisionFrameResult?> = _latestResult.asStateFlow()
+  override val latestResult: StateFlow<VisionFrameResult?> = _latestResult.asStateFlow()
 
   private val _availability = MutableStateFlow(detector.availability)
-  val availability: StateFlow<DetectorAvailability> = _availability.asStateFlow()
+  override val availability: StateFlow<DetectorAvailability> = _availability.asStateFlow()
 
   private val _calibration = MutableStateFlow(CameraCalibrationConfig())
-  val calibration: StateFlow<CameraCalibrationConfig> = _calibration.asStateFlow()
+  override val calibration: StateFlow<CameraCalibrationConfig> = _calibration.asStateFlow()
+
+  val activeModelSpec: VisionModelSpec?
+    get() = detector.activeModelSpec
 
   private val enabled = AtomicBoolean(false)
-  private val frameQueue = Channel<Pair<Bitmap, Boolean>>(Channel.CONFLATED)
+  private val frameQueue = Channel<Triple<Bitmap, Boolean, Long>>(Channel.CONFLATED)
   private var workerJob: Job? = null
   private var nativeVisionHandle: Long = 0L
   @Volatile private var confidenceThreshold: Float = 0.40f
@@ -54,10 +86,18 @@ class VisionPipelineCoordinator(
   private val rgbDirectBuffer = ByteBuffer.allocateDirect(flowWidth * flowHeight * 3)
   private val flowPixels = IntArray(flowWidth * flowHeight)
 
-  fun initializeAsync() {
+  override fun initializeAsync() {
     visionScope.launch {
-      if (nativeVisionHandle == 0L && AutopilotNativeBridge.isNativeLoaded) {
-        nativeVisionHandle = AutopilotNativeBridge.nativeCreateVisionEngine()
+      ensureInitializedOnWorker()
+    }
+  }
+
+  override fun selectModel(spec: VisionModelSpec?, preferGpu: Boolean) {
+    visionScope.launch {
+      detector.setPreferGpu(preferGpu)
+      detector.setModelSpec(spec)
+      if (nativeVisionHandle != 0L && AutopilotNativeBridge.isNativeLoaded) {
+        AutopilotNativeBridge.nativeResetVisionEngine(nativeVisionHandle)
       }
       _availability.value = detector.initialize()
     }
@@ -73,15 +113,15 @@ class VisionPipelineCoordinator(
     }
   }
 
-  fun updateCalibration(focalLengthPx: Float, isCalibrated: Boolean) {
+  override fun updateCalibration(focalLengthPx: Float, isCalibrated: Boolean) {
     _calibration.value = CameraCalibrationConfig(focalLengthPx, isCalibrated)
   }
 
-  fun updateConfidenceThreshold(threshold: Float) {
+  override fun updateConfidenceThreshold(threshold: Float) {
     confidenceThreshold = threshold.coerceIn(0.15f, 0.90f)
   }
 
-  fun setEnabled(active: Boolean) {
+  override fun setEnabled(active: Boolean) {
     enabled.set(active)
     if (active && workerJob == null) {
       startWorker()
@@ -90,73 +130,123 @@ class VisionPipelineCoordinator(
     }
   }
 
-  fun submitFrame(bitmap: Bitmap, isSynthetic: Boolean) {
+  override fun submitFrame(bitmap: Bitmap, isSynthetic: Boolean) {
+    submitFrameWithTimestamp(bitmap, isSynthetic, frameTimestampUs = 0L)
+  }
+
+  fun submitFrameWithTimestamp(bitmap: Bitmap, isSynthetic: Boolean, frameTimestampUs: Long) {
     if (!enabled.get()) return
-    // Copy bitmap safely so video decoder reuse does not race with background inference.
+    // Copy bitmap safely so upstream buffer reuse does not race with background inference.
     val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: return
-    val result = frameQueue.trySend(copy to isSynthetic)
+    val result = frameQueue.trySend(Triple(copy, isSynthetic, frameTimestampUs))
     if (result.isFailure) {
       copy.recycle()
+    }
+  }
+
+  override suspend fun processFrameSynchronously(
+    bitmap: Bitmap,
+    isSynthetic: Boolean,
+    frameTimestampUs: Long,
+  ): VisionFrameResult =
+    withContext(visionDispatcher.dispatcher) {
+      ensureInitializedOnWorker()
+      executeSingleFrame(bitmap, isSynthetic, frameTimestampUs, recycleFrame = false)
+    }
+
+  fun resetTrackerStateAsync() {
+    visionScope.launch {
+      if (nativeVisionHandle != 0L && AutopilotNativeBridge.isNativeLoaded) {
+        AutopilotNativeBridge.nativeResetVisionEngine(nativeVisionHandle)
+      }
+      _latestResult.value = null
+    }
+  }
+
+  private fun ensureInitializedOnWorker() {
+    if (nativeVisionHandle == 0L && AutopilotNativeBridge.isNativeLoaded) {
+      nativeVisionHandle = AutopilotNativeBridge.nativeCreateVisionEngine()
+    }
+    if (detector.availability !is DetectorAvailability.Ready) {
+      _availability.value = detector.initialize()
     }
   }
 
   private fun startWorker() {
     workerJob =
       visionScope.launch {
-        if (nativeVisionHandle == 0L && AutopilotNativeBridge.isNativeLoaded) {
-          nativeVisionHandle = AutopilotNativeBridge.nativeCreateVisionEngine()
-        }
-        if (detector.availability !is DetectorAvailability.Ready) {
-          _availability.value = detector.initialize()
-        }
-
-        for ((frame, isSynthetic) in frameQueue) {
+        ensureInitializedOnWorker()
+        for ((frame, isSynthetic, timestampUs) in frameQueue) {
           if (!enabled.get()) {
             frame.recycle()
             continue
           }
-          val startNs = System.nanoTime()
-          val detections =
-            if (detector.availability is DetectorAvailability.Ready) {
-              detector.detect(frame, confidenceThreshold)
-            } else {
-              emptyList()
-            }
-
-          packRgb24ForFlow(frame)
-          frame.recycle()
-
-          val packedDets = FloatArray(detections.size * 6)
-          detections.forEachIndexed { idx, d ->
-            val base = idx * 6
-            packedDets[base] = d.classId.toFloat()
-            packedDets[base + 1] = d.confidence
-            packedDets[base + 2] = d.boxNormalized.left
-            packedDets[base + 3] = d.boxNormalized.top
-            packedDets[base + 4] = d.boxNormalized.right
-            packedDets[base + 5] = d.boxNormalized.bottom
-          }
-
-          val cal = _calibration.value
-          val nativeOut =
-            if (nativeVisionHandle != 0L && AutopilotNativeBridge.isNativeLoaded) {
-              AutopilotNativeBridge.nativeProcessVisionFrame(
-                handle = nativeVisionHandle,
-                rgb24DirectBuffer = rgbDirectBuffer,
-                width = flowWidth,
-                height = flowHeight,
-                detectionsPacked = packedDets,
-                focalLengthPx = cal.focalLengthPx,
-                isCalibrated = cal.isCalibrated,
-              )
-            } else {
-              FloatArray(0)
-            }
-
-          val elapsedMs = (System.nanoTime() - startNs) / 1_000_000f
-          _latestResult.value = unpackVisionResult(nativeOut, elapsedMs, isSynthetic, cal.isCalibrated)
+          _latestResult.value =
+            executeSingleFrame(frame, isSynthetic, timestampUs, recycleFrame = true)
         }
       }
+  }
+
+  private fun executeSingleFrame(
+    frame: Bitmap,
+    isSynthetic: Boolean,
+    frameTimestampUs: Long,
+    recycleFrame: Boolean,
+  ): VisionFrameResult {
+    val startNs = System.nanoTime()
+    val (detections, detTimings) =
+      if (detector.availability is DetectorAvailability.Ready) {
+        detector.detectWithTimings(frame, confidenceThreshold)
+      } else {
+        emptyList<VisionDetection>() to VisionStageTimingsMs()
+      }
+
+    val trackStartNs = System.nanoTime()
+    packRgb24ForFlow(frame)
+    if (recycleFrame) {
+      frame.recycle()
+    }
+
+    val packedDets = FloatArray(detections.size * 6)
+    detections.forEachIndexed { idx, d ->
+      val base = idx * 6
+      packedDets[base] = d.classId.toFloat()
+      packedDets[base + 1] = d.confidence
+      packedDets[base + 2] = d.boxNormalized.left
+      packedDets[base + 3] = d.boxNormalized.top
+      packedDets[base + 4] = d.boxNormalized.right
+      packedDets[base + 5] = d.boxNormalized.bottom
+    }
+
+    val cal = _calibration.value
+    val nativeOut =
+      if (nativeVisionHandle != 0L && AutopilotNativeBridge.isNativeLoaded) {
+        AutopilotNativeBridge.nativeProcessVisionFrame(
+          handle = nativeVisionHandle,
+          rgb24DirectBuffer = rgbDirectBuffer,
+          width = flowWidth,
+          height = flowHeight,
+          detectionsPacked = packedDets,
+          focalLengthPx = cal.focalLengthPx,
+          isCalibrated = cal.isCalibrated,
+        )
+      } else {
+        FloatArray(0)
+      }
+
+    val endNs = System.nanoTime()
+    val elapsedMs = (endNs - startNs) / 1_000_000f
+    val trackMs = (endNs - trackStartNs) / 1_000_000f
+    val fullTimings = detTimings.copy(trackingFlowMs = trackMs, totalMs = elapsedMs)
+    return unpackVisionResult(
+      packed = nativeOut,
+      inferenceMs = elapsedMs,
+      isSynthetic = isSynthetic,
+      isCalibrated = cal.isCalibrated,
+      stageTimings = fullTimings,
+      modelId = detector.activeModelSpec?.id ?: "yolo26n",
+      frameTimestampUs = frameTimestampUs,
+    )
   }
 
   private fun packRgb24ForFlow(src: Bitmap) {
@@ -177,6 +267,9 @@ class VisionPipelineCoordinator(
     inferenceMs: Float,
     isSynthetic: Boolean,
     isCalibrated: Boolean,
+    stageTimings: VisionStageTimingsMs,
+    modelId: String,
+    frameTimestampUs: Long,
   ): VisionFrameResult {
     if (packed.size < 4) {
       return VisionFrameResult(
@@ -188,6 +281,9 @@ class VisionPipelineCoordinator(
         flowVectors = emptyList(),
         trackedTargets = emptyList(),
         isSyntheticInput = isSynthetic,
+        stageTimingsMs = stageTimings,
+        modelId = modelId,
+        frameTimestampUs = frameTimestampUs,
       )
     }
 
@@ -251,6 +347,9 @@ class VisionPipelineCoordinator(
       isSyntheticInput = isSynthetic,
       rotationalYawOmega = rotOmega,
       validFlowCount = validFlowCount,
+      stageTimingsMs = stageTimings,
+      modelId = modelId,
+      frameTimestampUs = frameTimestampUs,
     )
   }
 

@@ -215,4 +215,40 @@ object AutopilotNativeBridge {
     focalLengthPx: Float,
     isCalibrated: Boolean,
   ): FloatArray
+
+  external fun nativeCreateDegraderEngine(): Long
+
+  external fun nativeDestroyDegraderEngine(handle: Long)
+
+  external fun nativeDegradeYuv420(
+    handle: Long,
+    yBuf: ByteBuffer,
+    yStride: Int,
+    uBuf: ByteBuffer,
+    uStride: Int,
+    uPixStride: Int,
+    vBuf: ByteBuffer,
+    vStride: Int,
+    vPixStride: Int,
+    srcW: Int,
+    srcH: Int,
+    rotationDeg: Int,
+    mirrorH: Boolean,
+    outCleanBuf: ByteBuffer?,
+    cleanW: Int,
+    cleanH: Int,
+    outDegradedBuf: ByteBuffer,
+    intParams: IntArray,
+    floatParams: FloatArray,
+  ): Long
+
+  external fun nativeDegradeRgba(
+    handle: Long,
+    srcRgbaBuf: ByteBuffer,
+    srcW: Int,
+    srcH: Int,
+    outDegradedBuf: ByteBuffer,
+    intParams: IntArray,
+    floatParams: FloatArray,
+  ): Long
 }

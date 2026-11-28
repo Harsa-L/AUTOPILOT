@@ -36,6 +36,7 @@ import com.example.ui.SettingsFlightControlsScreen
 import com.example.ui.SettingsLogsScreen
 import com.example.ui.SettingsScreen
 import com.example.ui.VisionScreen
+import com.example.ui.benchmark.VisionBenchmarkScreen
 
 class MainActivity : ComponentActivity() {
 
@@ -182,6 +183,14 @@ fun AutopilotAppShell(
       composable<AutopilotRoute.Vision> {
         VisionScreen(
           viewModel = viewModel,
+          onNavigateBack = { navController.popBackStack() },
+          onOpenBenchmarkStudio = {
+            navController.navigate(AutopilotRoute.VisionBenchmark) { launchSingleTop = true }
+          },
+        )
+      }
+      composable<AutopilotRoute.VisionBenchmark> {
+        VisionBenchmarkScreen(
           onNavigateBack = { navController.popBackStack() },
         )
       }
