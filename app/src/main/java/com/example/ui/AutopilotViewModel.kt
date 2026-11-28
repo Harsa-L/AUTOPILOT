@@ -24,12 +24,33 @@ import com.autopilot.drone.protocols.WifiLinkSnapshot
 import com.autopilot.flight.control.ControlSensitivityConfig
 import com.autopilot.flight.control.FlightState
 import com.autopilot.flight.control.FlightStateController
+import com.autopilot.flight.gravity.GravityPreset
+import com.autopilot.flight.gravity.GravityProfile
+import com.autopilot.flight.gravity.GravityResponseCurve
+import com.autopilot.flight.input.DeviceSafetyEvaluation
+import com.autopilot.flight.input.DeviceSafetyPolicy
+import com.autopilot.flight.input.FlightAxis
+import com.autopilot.flight.input.FlightCommandLimiter
+import com.autopilot.flight.input.FlightInputMixer
+import com.autopilot.flight.input.InputSourceId
+import com.autopilot.flight.input.StickInputProfile
+import com.autopilot.flight.interaction.CockpitInteractionMode
+import com.autopilot.flight.interaction.InteractionModeController
+import com.autopilot.flight.interaction.InteractionModeState
+import com.autopilot.flight.interaction.PointerRouteDecision
+import com.autopilot.flight.interaction.TouchInteractionRouter
+import com.autopilot.flight.interaction.TouchOwner
+import com.autopilot.flight.touch.JoystickMode
+import com.autopilot.flight.touch.TouchControlEngine
+import com.autopilot.flight.touch.TouchPointPx
+import com.autopilot.flight.touch.TouchZoneRuntime
 import com.autopilot.video.MvFilterPreset
 import com.autopilot.video.VideoCaptureState
 import com.autopilot.video.VideoFrameTransform
 import com.autopilot.video.VideoPipelineController
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.DetectorAvailability
+import com.autopilot.vision.OpticalFlowHoverController
 import com.autopilot.vision.TrackedTarget
 import com.autopilot.vision.VisionFrameResult
 import com.autopilot.vision.VisionPipelineCoordinator
@@ -45,11 +66,15 @@ import com.example.input.FlightMacroPreset
 import com.example.input.GamepadAction
 import com.example.input.GamepadAxes
 import com.example.input.GamepadStatus
+import com.example.input.GravityRuntimeStatus
 import com.example.input.GravitySensorHandler
 import com.example.input.KeyboardAction
 import com.example.input.KeyboardAxes
 import com.example.input.SpinnerMode
 import com.example.service.FlightLinkForegroundService
+import com.example.ui.hud.HudElementId
+import com.example.ui.hud.HudLayoutConfig
+import com.example.ui.hud.HudLayoutEngine
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -71,6 +96,16 @@ data class TelemetryExportBundle(
   val traces: List<DiagnosticTraceEntity>,
 )
 
+data class HudHistoryFlags(
+  val canUndoPortrait: Boolean = false,
+  val canRedoPortrait: Boolean = false,
+  val canUndoLandscape: Boolean = false,
+  val canRedoLandscape: Boolean = false,
+) {
+  fun canUndo(landscape: Boolean): Boolean = if (landscape) canUndoLandscape else canUndoPortrait
+  fun canRedo(landscape: Boolean): Boolean = if (landscape) canRedoLandscape else canRedoPortrait
+}
+
 class AutopilotViewModel(application: Application) : AndroidViewModel(application) {
 
   private val dispatchers = DefaultAutopilotDispatchers()
@@ -84,29 +119,103 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   val videoPipeline = VideoPipelineController(viewModelScope, dispatchers)
   val visionCoordinator = VisionPipelineCoordinator(application, dispatchers, preferGpu = true)
 
-  val automationCoordinator =
+  val inputMixer = FlightInputMixer()
+  val touchControlEngine = TouchControlEngine()
+  private val commandLimiter = FlightCommandLimiter(maxDeltaPerStep = 0.28f)
+  private val hoverController = OpticalFlowHoverController()
+
+  lateinit var interactionModeController: InteractionModeController
+  lateinit var touchRouter: TouchInteractionRouter
+
+  val automationCoordinator: FlightAutomationCoordinator =
     FlightAutomationCoordinator(viewModelScope) { roll, pitch, throttle, yaw ->
-      val effectiveThrottle = if (throttle != 0f) throttle else leftStickY
-      flightController.sendStickInput(
-        roll = roll,
-        pitch = pitch,
-        throttle = effectiveThrottle,
-        yaw = yaw,
+      val activeSrc =
+        if (automationCoordinator.state.value.spinnerMode != SpinnerMode.NONE) InputSourceId.SPINNER
+        else InputSourceId.TRAJECTORY
+      inputMixer.submit(
+        activeSrc,
+        mapOf(
+          FlightAxis.ROLL to roll,
+          FlightAxis.PITCH to pitch,
+          FlightAxis.THROTTLE to throttle,
+          FlightAxis.YAW to yaw,
+        ),
+        active = true,
       )
+      pushMixedSticks()
     }
 
-  val gravityHandler =
-    GravitySensorHandler(application) { roll, pitch ->
+  val gravityHandler: GravitySensorHandler =
+    GravitySensorHandler(application) { roll, pitch, valid ->
+      if (!valid) {
+        inputMixer.neutralizeSource(InputSourceId.GRAVITY)
+        if (automationCoordinator.state.value.gravityActive) {
+          pushMixedSticks()
+        }
+        return@GravitySensorHandler
+      }
       if (automationCoordinator.state.value.gravityActive &&
-        !manualStickActive &&
-        !keyboardAxesActive &&
-        !gamepadAxesActive
+        !interactionModeController.state.suspendedInputSources.contains(InputSourceId.GRAVITY)
       ) {
-        rightStickX = roll
-        rightStickY = pitch
-        pushSticks()
+        inputMixer.submit(
+          source = InputSourceId.GRAVITY,
+          axes = mapOf(FlightAxis.ROLL to roll, FlightAxis.PITCH to pitch),
+          active = true,
+          staleTimeoutMs = gravityHandler.profile.staleSensorTimeoutMs,
+        )
+        pushMixedSticks()
       }
     }
+
+  init {
+    interactionModeController =
+      InteractionModeController(
+        onSuspendSources = { suspended ->
+          suspended.forEach { inputMixer.suspendSource(it, neutralizeOwnedAxes = true) }
+          inputMixer.suspendSource(InputSourceId.VISION_SERVO, neutralizeOwnedAxes = true)
+          commandLimiter.reset()
+          hoverController.reset()
+          touchControlEngine.resetAll(neutralizeThrottle = true)
+          syncTouchRuntimeFlows()
+          gravityHandler.setPausedForTool(suspended.contains(InputSourceId.GRAVITY))
+          pushMixedSticks()
+        },
+        onResumePiloting = { restoreGravity, progressiveMs ->
+          listOf(
+            InputSourceId.ATC_LEFT,
+            InputSourceId.ATC_RIGHT,
+            InputSourceId.FIXED_LEFT_STICK,
+            InputSourceId.FIXED_RIGHT_STICK,
+            InputSourceId.GRAVITY,
+            InputSourceId.TRAJECTORY,
+            InputSourceId.SPINNER,
+            InputSourceId.VISION_SERVO,
+          ).forEach { src ->
+            inputMixer.resumeSource(src, progressiveRampMs = if (src == InputSourceId.GRAVITY) progressiveMs else 0L)
+          }
+          if (restoreGravity) {
+            gravityHandler.setPausedForTool(false)
+            automationCoordinator.setGravityActive(true)
+          }
+          pushMixedSticks()
+        },
+        onNeutralizeAxes = { axes ->
+          if (axes.contains(FlightAxis.ROLL) && axes.contains(FlightAxis.PITCH)) {
+            rightStickX = 0f
+            rightStickY = 0f
+          }
+          if (axes.contains(FlightAxis.YAW)) {
+            leftStickX = 0f
+          }
+          if (axes.contains(FlightAxis.THROTTLE)) {
+            leftStickY = 0f
+          }
+          commandLimiter.reset()
+          pushMixedSticks()
+        },
+      )
+    touchRouter = TouchInteractionRouter(interactionModeController)
+  }
 
   val themeState: StateFlow<ThemeRuntimeState> = themeManager.state
   val wifiLink: StateFlow<WifiLinkSnapshot> = wifiController.linkState
@@ -117,12 +226,15 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   val speedTier: StateFlow<Int> = flightController.speedTier
   val fastFly: StateFlow<Boolean> = flightController.fastFly
   val headlessMode: StateFlow<Boolean> = flightController.headlessMode
+  val fixedHeightMode: StateFlow<Boolean> = flightController.fixedHeightMode
+  val linkRxVerified: StateFlow<Boolean> = flightController.linkRxVerified
   val cameraTiltStep: StateFlow<Int> = flightController.cameraTiltStep
   val videoState: StateFlow<VideoStreamState> = videoPipeline.streamState
   val captureState: StateFlow<VideoCaptureState> = videoPipeline.captureState
   val visionResult: StateFlow<VisionFrameResult?> = visionCoordinator.latestResult
   val detectorAvailability: StateFlow<DetectorAvailability> = visionCoordinator.availability
   val automationState: StateFlow<AutomationState> = automationCoordinator.state
+  val gravityStatus: StateFlow<GravityRuntimeStatus> = gravityHandler.status
   val builtInMacros: List<FlightMacroPreset>
     get() = automationCoordinator.builtInMacros
 
@@ -185,6 +297,48 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   private val _activeTargetTask = MutableStateFlow<ActiveTargetTask?>(null)
   val activeTargetTask: StateFlow<ActiveTargetTask?> = _activeTargetTask.asStateFlow()
 
+  private val _interactionModeState = MutableStateFlow(InteractionModeState())
+  val interactionModeState: StateFlow<InteractionModeState> = _interactionModeState.asStateFlow()
+
+  private val _atcLeftRuntime = MutableStateFlow(touchControlEngine.leftRuntime)
+  val atcLeftRuntime: StateFlow<TouchZoneRuntime> = _atcLeftRuntime.asStateFlow()
+
+  private val _atcRightRuntime = MutableStateFlow(touchControlEngine.rightRuntime)
+  val atcRightRuntime: StateFlow<TouchZoneRuntime> = _atcRightRuntime.asStateFlow()
+
+  private val _hudPortraitLayout = MutableStateFlow(HudLayoutEngine.defaultPortrait())
+  val hudPortraitLayout: StateFlow<HudLayoutConfig> = _hudPortraitLayout.asStateFlow()
+
+  private val _hudLandscapeLayout = MutableStateFlow(HudLayoutEngine.defaultLandscape())
+  val hudLandscapeLayout: StateFlow<HudLayoutConfig> = _hudLandscapeLayout.asStateFlow()
+
+  private val _selectedHudElement = MutableStateFlow(HudElementId.TOP_LEFT_STATUS)
+  val selectedHudElement: StateFlow<HudElementId> = _selectedHudElement.asStateFlow()
+
+  private val _hoverAssistEnabled = MutableStateFlow(false)
+  val hoverAssistEnabled: StateFlow<Boolean> = _hoverAssistEnabled.asStateFlow()
+
+  private val _diagSummary = MutableStateFlow("")
+  val diagSummary: StateFlow<String> = _diagSummary.asStateFlow()
+
+  private val _hudHistoryFlags = MutableStateFlow(HudHistoryFlags())
+  val hudHistoryFlags: StateFlow<HudHistoryFlags> = _hudHistoryFlags.asStateFlow()
+
+  private val portraitUndoStack = ArrayDeque<HudLayoutConfig>()
+  private val portraitRedoStack = ArrayDeque<HudLayoutConfig>()
+  private val landscapeUndoStack = ArrayDeque<HudLayoutConfig>()
+  private val landscapeRedoStack = ArrayDeque<HudLayoutConfig>()
+
+  private val _deviceSafetyEvaluation =
+    MutableStateFlow(
+      DeviceSafetyPolicy.evaluate(
+        _selectedEntry.value.descriptor,
+        _selectedEntry.value.capabilities,
+      )
+    )
+  val deviceSafetyEvaluation: StateFlow<DeviceSafetyEvaluation> =
+    _deviceSafetyEvaluation.asStateFlow()
+
   private var activeSessionRowId: Long? = null
   private var leftStickX = 0f
   private var leftStickY = 0f
@@ -195,8 +349,10 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   private var keyboardAxesActive = false
   private var keyboardThrottleInput = 0f
   private var keyboardHoldJob: Job? = null
+  private var gravityWatchdogJob: Job? = null
   private var lastVisionTiltAtMs = 0L
   private var trackingLoopJob: Job? = null
+  private var trajectoryStrokeBuffer = mutableListOf<Offset>()
 
   init {
     wifiController.refreshCurrentWifiState()
@@ -229,7 +385,11 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         )
       )
       _visionOverlayEnabled.value = prefs.visionOverlayEnabled
-      visionCoordinator.setEnabled(prefs.visionOverlayEnabled)
+      _hoverAssistEnabled.value = prefs.opticalFlowHoverAssistEnabled
+      flightController.allowExperimentalFlightCommands = prefs.allowExperimentalFlightCommands
+      visionCoordinator.setEnabled(
+        prefs.visionOverlayEnabled || _targetSelectionEnabled.value || prefs.opticalFlowHoverAssistEnabled
+      )
       visionCoordinator.updateCalibration(prefs.calibrationFocalLengthPx, prefs.calibrationVerified)
       visionCoordinator.updateConfidenceThreshold(prefs.visionConfidenceThreshold)
       _targetActionConfig.value =
@@ -252,6 +412,25 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     startVisionTrackingLoop()
+    startGravityWatchdogLoop()
+  }
+
+  private fun startGravityWatchdogLoop() {
+    gravityWatchdogJob?.cancel()
+    gravityWatchdogJob =
+      viewModelScope.launch {
+        while (true) {
+          delay(120L)
+          if (automationCoordinator.state.value.gravityActive) {
+            gravityHandler.checkFreshness()
+          }
+        }
+      }
+  }
+
+  private fun syncTouchRuntimeFlows() {
+    _atcLeftRuntime.value = touchControlEngine.leftRuntime
+    _atcRightRuntime.value = touchControlEngine.rightRuntime
   }
 
   private fun syncLivePrefTargets(
@@ -268,8 +447,77 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         mvFilter = prefs.mvFilterPreset,
       )
     )
-    gravityHandler.maxTiltDeg = prefs.gravityMaxAngleDeg
+    gravityHandler.profile =
+      GravityProfile(
+        enabled = automationCoordinator.state.value.gravityActive,
+        sensitivityPitch = prefs.gravitySensitivityPitch,
+        sensitivityRoll = prefs.gravitySensitivityRoll,
+        deadzonePitchDeg = prefs.gravityDeadzoneDeg,
+        deadzoneRollDeg = prefs.gravityDeadzoneDeg,
+        maxTiltPitchDeg = prefs.gravityMaxAngleDeg,
+        maxTiltRollDeg = prefs.gravityMaxAngleDeg,
+        responseCurve = prefs.gravityCurve,
+        smoothingAlpha = prefs.gravitySmoothingAlpha,
+        slewRatePerSec = prefs.gravitySlewRatePerSec,
+        preset = prefs.gravityPreset,
+      )
+    flightController.allowExperimentalFlightCommands = prefs.allowExperimentalFlightCommands
+    _hoverAssistEnabled.value = prefs.opticalFlowHoverAssistEnabled
+    visionCoordinator.setEnabled(
+      _visionOverlayEnabled.value || _targetSelectionEnabled.value || prefs.opticalFlowHoverAssistEnabled
+    )
     automationCoordinator.spinnerRate = prefs.spinnerSpeedRatio
+    inputMixer.ownershipManager.applyProfile(
+      profile = prefs.stickInputProfile,
+      gravityEnabled = automationCoordinator.state.value.gravityActive,
+    )
+    inputMixer.holdThrottleOnRelease = prefs.gamepadThrottleHold
+
+    val baseLeft = TouchControlEngine.defaultLeftZone(enabled = prefs.stickInputProfile != StickInputProfile.MANUAL_LOCKED)
+    val baseRight =
+      TouchControlEngine.defaultRightZone(
+        enabled =
+          prefs.stickInputProfile != StickInputProfile.ATC_HYBRID_GRAVITY &&
+            prefs.stickInputProfile != StickInputProfile.MANUAL_LOCKED &&
+            !automationCoordinator.state.value.gravityActive,
+      )
+    val leftInvertX = if (prefs.atcSwapZones) prefs.atcInvertRoll else prefs.atcInvertYaw
+    val leftInvertY = if (prefs.atcSwapZones) prefs.atcInvertPitch else prefs.atcInvertThrottle
+    val rightInvertX = if (prefs.atcSwapZones) prefs.atcInvertYaw else prefs.atcInvertRoll
+    val rightInvertY = if (prefs.atcSwapZones) prefs.atcInvertThrottle else prefs.atcInvertPitch
+    val leftCfg =
+      (if (prefs.atcSwapZones) baseRight.copy(id = "left") else baseLeft).copy(
+        joystickMode = prefs.atcJoystickMode,
+        sensitivityX = prefs.atcSensitivity,
+        sensitivityY = prefs.atcSensitivity,
+        deadzone = prefs.atcDeadzone,
+        visualRadiusDp = prefs.atcMaxTravelDp,
+        opacity = prefs.atcOpacity,
+        invertX = leftInvertX,
+        invertY = leftInvertY,
+      )
+    val rightCfg =
+      (if (prefs.atcSwapZones) baseLeft.copy(id = "right") else baseRight).copy(
+        joystickMode = prefs.atcJoystickMode,
+        sensitivityX = prefs.atcSensitivity,
+        sensitivityY = prefs.atcSensitivity,
+        deadzone = prefs.atcDeadzone,
+        visualRadiusDp = prefs.atcMaxTravelDp,
+        opacity = prefs.atcOpacity,
+        invertX = rightInvertX,
+        invertY = rightInvertY,
+      )
+    touchControlEngine.updateZoneConfigs(leftCfg, rightCfg)
+    syncTouchRuntimeFlows()
+
+    if (prefs.hudLayoutPortraitJson.isNotBlank()) {
+      _hudPortraitLayout.value = HudLayoutEngine.deserialize(prefs.hudLayoutPortraitJson, landscape = false)
+    }
+    if (prefs.hudLayoutLandscapeJson.isNotBlank()) {
+      _hudLandscapeLayout.value = HudLayoutEngine.deserialize(prefs.hudLayoutLandscapeJson, landscape = true)
+    }
+    _deviceSafetyEvaluation.value =
+      DeviceSafetyPolicy.evaluate(entry.descriptor, entry.capabilities, prefs.gamepadThrottleHold)
   }
 
   fun selectProtocol(protocolId: String, persist: Boolean = true) {
@@ -413,7 +661,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       FlightLinkForegroundService.start(getApplication(), desc.displayName)
       flightController.connectProtocol(adapter, config)
       videoPipeline.attachToProtocol(adapter, transportOverride = selectedVideo) { bitmap, isSynthetic ->
-        if (_visionOverlayEnabled.value || _targetSelectionEnabled.value) {
+        if (_visionOverlayEnabled.value || _targetSelectionEnabled.value || _hoverAssistEnabled.value) {
           visionCoordinator.submitFrame(bitmap, isSynthetic)
         }
       }
@@ -457,6 +705,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   fun onManualStickTouchChanged(active: Boolean) {
     manualStickActive = active
     if (active) {
+      hoverController.notifyManualInput(System.currentTimeMillis())
       preemptAutomationOnManualInput()
       if (_activeTargetTask.value != null && _activeTargetTask.value?.action != TargetActionType.TRACK_TARGET) {
         stopTargetAction()
@@ -467,21 +716,136 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   fun onLeftStickChanged(yaw: Float, throttle: Float) {
     leftStickX = yaw
     leftStickY = throttle
-    pushSticks()
+    if (yaw != 0f || throttle != 0f) {
+      hoverController.notifyManualInput(System.currentTimeMillis())
+    }
+    inputMixer.submit(
+      InputSourceId.FIXED_LEFT_STICK,
+      mapOf(FlightAxis.YAW to yaw, FlightAxis.THROTTLE to throttle),
+      active = yaw != 0f || throttle != 0f,
+    )
+    pushMixedSticks()
   }
 
   fun onRightStickChanged(roll: Float, pitch: Float) {
     if (roll != 0f || pitch != 0f) {
+      hoverController.notifyManualInput(System.currentTimeMillis())
       preemptAutomationOnManualInput()
     }
     rightStickX = roll
     rightStickY = pitch
-    pushSticks()
+    inputMixer.submit(
+      InputSourceId.FIXED_RIGHT_STICK,
+      mapOf(FlightAxis.ROLL to roll, FlightAxis.PITCH to pitch),
+      active = roll != 0f || pitch != 0f,
+    )
+    pushMixedSticks()
+  }
+
+  fun pickAtcZone(normX: Float, normY: Float): TouchOwner? {
+    val zone = touchControlEngine.pickZoneForNormalizedPoint(normX, normY) ?: return null
+    return if (zone.id == "left") TouchOwner.ATC_LEFT else TouchOwner.ATC_RIGHT
+  }
+
+  fun onAtcPointerDown(
+    pointerId: Int,
+    zone: TouchOwner,
+    posPx: TouchPointPx,
+    viewportW: Float,
+    viewportH: Float,
+  ) {
+    val decision = touchRouter.onPointerDown(pointerId, requestedAtcZone = zone)
+    _interactionModeState.value = interactionModeController.state
+    if (decision is PointerRouteDecision.Capture) {
+      hoverController.notifyManualInput(System.currentTimeMillis())
+      val zoneId = if (decision.owner == TouchOwner.ATC_LEFT) "left" else "right"
+      val cmd = touchControlEngine.onDown(zoneId, pointerId, posPx, viewportW, viewportH)
+      if (cmd != null) {
+        val src = if (zoneId == "left") InputSourceId.ATC_LEFT else InputSourceId.ATC_RIGHT
+        if (zoneId == "right") {
+          preemptAutomationOnManualInput()
+        }
+        inputMixer.submit(src, cmd.axes, active = true)
+        syncTouchRuntimeFlows()
+        pushMixedSticks()
+      }
+    }
+  }
+
+  fun onAtcPointerMove(pointerId: Int, posPx: TouchPointPx) {
+    val owner = touchRouter.onPointerMove(pointerId)
+    if (owner != TouchOwner.ATC_LEFT && owner != TouchOwner.ATC_RIGHT) return
+    hoverController.notifyManualInput(System.currentTimeMillis())
+    val cmd = touchControlEngine.onMove(pointerId, posPx) ?: return
+    val src = if (cmd.zoneId == "left") InputSourceId.ATC_LEFT else InputSourceId.ATC_RIGHT
+    inputMixer.submit(src, cmd.axes, active = true)
+    syncTouchRuntimeFlows()
+    pushMixedSticks()
+  }
+
+  fun onAtcPointerUpOrCancel(pointerId: Int) {
+    val owner = touchRouter.onPointerUpOrCancel(pointerId)
+    _interactionModeState.value = interactionModeController.state
+    if (owner != TouchOwner.ATC_LEFT && owner != TouchOwner.ATC_RIGHT) return
+    val cmd =
+      touchControlEngine.onUpOrCancel(
+        pointerId = pointerId,
+        holdVerticalIfConfigured = userPrefs.value.gamepadThrottleHold,
+      ) ?: return
+    val src = if (cmd.zoneId == "left") InputSourceId.ATC_LEFT else InputSourceId.ATC_RIGHT
+    inputMixer.submit(src, cmd.axes, active = false)
+    syncTouchRuntimeFlows()
+    pushMixedSticks()
+  }
+
+  fun cancelAllAtcPointers() {
+    touchControlEngine.resetAll(neutralizeThrottle = true).forEach { cmd ->
+      val src = if (cmd.zoneId == "left") InputSourceId.ATC_LEFT else InputSourceId.ATC_RIGHT
+      inputMixer.submit(src, cmd.axes, active = false)
+    }
+    syncTouchRuntimeFlows()
+    pushMixedSticks()
+  }
+
+  fun onTrajectoryPointerDown(pointerId: Int, normPos: Offset): Boolean {
+    val decision = touchRouter.onPointerDown(pointerId)
+    _interactionModeState.value = interactionModeController.state
+    if (decision is PointerRouteDecision.Capture && decision.owner == TouchOwner.TRAJECTORY_DRAW) {
+      trajectoryStrokeBuffer = mutableListOf(normPos)
+      automationCoordinator.setPendingTrajectoryPoints(trajectoryStrokeBuffer.toList())
+      return true
+    }
+    return false
+  }
+
+  fun onTrajectoryPointerMove(pointerId: Int, normPos: Offset): Boolean {
+    if (touchRouter.onPointerMove(pointerId) != TouchOwner.TRAJECTORY_DRAW) return false
+    trajectoryStrokeBuffer.add(normPos)
+    automationCoordinator.setPendingTrajectoryPoints(trajectoryStrokeBuffer.toList())
+    return true
+  }
+
+  fun onTrajectoryPointerUpOrCancel(pointerId: Int) {
+    touchRouter.onPointerUpOrCancel(pointerId)
+    _interactionModeState.value = interactionModeController.state
+  }
+
+  fun onTargetPointerDown(pointerId: Int): Boolean {
+    val decision =
+      touchRouter.onPointerDown(pointerId, targetSelectActive = _targetSelectionEnabled.value)
+    _interactionModeState.value = interactionModeController.state
+    return decision is PointerRouteDecision.Capture && decision.owner == TouchOwner.VISION_TARGET
+  }
+
+  fun onTargetPointerUpOrCancel(pointerId: Int) {
+    touchRouter.onPointerUpOrCancel(pointerId)
+    _interactionModeState.value = interactionModeController.state
   }
 
   fun onGamepadAxesChanged(axes: GamepadAxes) {
     gamepadAxesActive = axes.activeStickMotion
     if (axes.activeStickMotion) {
+      hoverController.notifyManualInput(System.currentTimeMillis())
       preemptAutomationOnManualInput()
       if (_activeTargetTask.value != null && _activeTargetTask.value?.action != TargetActionType.TRACK_TARGET) {
         stopTargetAction()
@@ -491,7 +855,17 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     leftStickY = axes.throttle
     rightStickX = axes.roll
     rightStickY = axes.pitch
-    pushSticks()
+    inputMixer.submit(
+      InputSourceId.GAMEPAD,
+      mapOf(
+        FlightAxis.ROLL to axes.roll,
+        FlightAxis.PITCH to axes.pitch,
+        FlightAxis.THROTTLE to axes.throttle,
+        FlightAxis.YAW to axes.yaw,
+      ),
+      active = axes.activeStickMotion || axes.throttle != 0f,
+    )
+    pushMixedSticks()
   }
 
   fun onGamepadStatusChanged(status: GamepadStatus) {
@@ -525,6 +899,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   fun onKeyboardAxesChanged(axes: KeyboardAxes) {
     keyboardAxesActive = axes.active
     if (axes.active) {
+      hoverController.notifyManualInput(System.currentTimeMillis())
       preemptAutomationOnManualInput()
       if (_activeTargetTask.value != null && _activeTargetTask.value?.action != TargetActionType.TRACK_TARGET) {
         stopTargetAction()
@@ -540,7 +915,17 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
             while (keyboardThrottleInput != 0f) {
               delay(50L)
               leftStickY = (leftStickY + keyboardThrottleInput * 0.05f).coerceIn(-1f, 1f)
-              pushSticks()
+              inputMixer.submit(
+                InputSourceId.KEYBOARD,
+                mapOf(
+                  FlightAxis.ROLL to rightStickX,
+                  FlightAxis.PITCH to rightStickY,
+                  FlightAxis.THROTTLE to leftStickY,
+                  FlightAxis.YAW to leftStickX,
+                ),
+                active = true,
+              )
+              pushMixedSticks()
             }
           }
       }
@@ -550,7 +935,17 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     }
     rightStickX = axes.roll
     rightStickY = axes.pitch
-    pushSticks()
+    inputMixer.submit(
+      InputSourceId.KEYBOARD,
+      mapOf(
+        FlightAxis.ROLL to rightStickX,
+        FlightAxis.PITCH to rightStickY,
+        FlightAxis.THROTTLE to leftStickY,
+        FlightAxis.YAW to leftStickX,
+      ),
+      active = axes.active || leftStickY != 0f,
+    )
+    pushMixedSticks()
   }
 
   fun onKeyboardAction(action: KeyboardAction) {
@@ -589,15 +984,32 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
         return
       }
       stopTargetAction()
+      if (interactionModeController.state.mode != CockpitInteractionMode.PILOTING) {
+        interactionModeController.returnToPiloting(targetSelectActive = _targetSelectionEnabled.value)
+        _interactionModeState.value = interactionModeController.state
+      }
+      inputMixer.ownershipManager.applyProfile(userPrefs.value.stickInputProfile, gravityEnabled = true)
+      inputMixer.resumeSource(InputSourceId.GRAVITY, progressiveRampMs = gravityHandler.profile.progressiveResumeMs)
       automationCoordinator.setGravityActive(true)
       gravityHandler.setActive(true)
+      syncLivePrefTargets(userPrefs.value)
     } else {
       gravityHandler.setActive(false)
       automationCoordinator.setGravityActive(false)
+      inputMixer.neutralizeSource(InputSourceId.GRAVITY)
+      inputMixer.ownershipManager.applyProfile(userPrefs.value.stickInputProfile, gravityEnabled = false)
       rightStickX = 0f
       rightStickY = 0f
-      pushSticks()
+      syncLivePrefTargets(userPrefs.value)
+      pushMixedSticks()
     }
+  }
+
+  fun recenterGravity() {
+    val locked =
+      gravityHandler.profile.lockReferenceDuringSequence &&
+        automationCoordinator.state.value.activeSequenceTitle != null
+    gravityHandler.recenter(referenceLocked = locked)
   }
 
   fun toggleSpinner(mode: SpinnerMode) {
@@ -607,17 +1019,31 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     }
     if (mode != SpinnerMode.NONE) {
       gravityHandler.setActive(false)
+      inputMixer.neutralizeSource(InputSourceId.GRAVITY)
       stopTargetAction()
     }
     automationCoordinator.toggleSpinner(mode)
+    if (mode == SpinnerMode.NONE) {
+      inputMixer.neutralizeSource(InputSourceId.SPINNER)
+      pushMixedSticks()
+    }
   }
 
   fun setTrajectoryDrawMode(enabled: Boolean) {
     if (enabled) {
-      gravityHandler.setActive(false)
+      val wasGravity = automationCoordinator.state.value.gravityActive
       stopTargetAction()
+      interactionModeController.enterTrajectoryMode(gravityCurrentlyActive = wasGravity)
+      _interactionModeState.value = interactionModeController.state
+      automationCoordinator.setTrajectoryDrawMode(true)
+    } else {
+      automationCoordinator.setTrajectoryDrawMode(false)
+      interactionModeController.returnToPiloting(
+        targetSelectActive = _targetSelectionEnabled.value,
+        restoreGravity = true,
+      )
+      _interactionModeState.value = interactionModeController.state
     }
-    automationCoordinator.setTrajectoryDrawMode(enabled)
   }
 
   fun updatePendingTrajectory(points: List<Offset>) {
@@ -626,16 +1052,181 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun executeTrajectory() {
     val state = flightState.value
+    val eval = _deviceSafetyEvaluation.value
+    if (!eval.supportsTrajectoryExecution) {
+      return
+    }
     if (state != FlightState.Armed && state != FlightState.Flying) {
       return
     }
     gravityHandler.setActive(false)
     stopTargetAction()
-    automationCoordinator.executePendingTrajectory()
+    automationCoordinator.executePendingTrajectory(protocolSupportsTrajectory = true)
+    interactionModeController.returnToPiloting(
+      targetSelectActive = _targetSelectionEnabled.value,
+      restoreGravity = false,
+    )
+    _interactionModeState.value = interactionModeController.state
   }
 
   fun clearTrajectory() {
     automationCoordinator.clearTrajectory()
+    if (interactionModeController.state.mode == CockpitInteractionMode.TRAJECTORY) {
+      interactionModeController.returnToPiloting(
+        targetSelectActive = _targetSelectionEnabled.value,
+        restoreGravity = true,
+      )
+      _interactionModeState.value = interactionModeController.state
+    }
+  }
+
+  fun enterHudEditingMode() {
+    val wasGravity = automationCoordinator.state.value.gravityActive
+    automationCoordinator.setTrajectoryDrawMode(false)
+    stopTargetAction()
+    interactionModeController.enterHudEditingMode(gravityCurrentlyActive = wasGravity)
+    _interactionModeState.value = interactionModeController.state
+  }
+
+  fun exitHudEditingMode() {
+    interactionModeController.returnToPiloting(
+      targetSelectActive = _targetSelectionEnabled.value,
+      restoreGravity = true,
+    )
+    _interactionModeState.value = interactionModeController.state
+    viewModelScope.launch {
+      prefsStore.updateHudLayouts(
+        portraitJson = HudLayoutEngine.serialize(_hudPortraitLayout.value),
+        landscapeJson = HudLayoutEngine.serialize(_hudLandscapeLayout.value),
+      )
+    }
+  }
+
+  fun selectHudElement(id: HudElementId) {
+    _selectedHudElement.value = id
+  }
+
+  private fun pushHudUndoSnapshot(landscape: Boolean) {
+    val undo = if (landscape) landscapeUndoStack else portraitUndoStack
+    val redo = if (landscape) landscapeRedoStack else portraitRedoStack
+    val current = if (landscape) _hudLandscapeLayout.value else _hudPortraitLayout.value
+    if (undo.size >= 25) undo.removeFirst()
+    undo.addLast(current)
+    redo.clear()
+    refreshHudHistoryFlags()
+  }
+
+  private fun refreshHudHistoryFlags() {
+    _hudHistoryFlags.value =
+      HudHistoryFlags(
+        canUndoPortrait = portraitUndoStack.isNotEmpty(),
+        canRedoPortrait = portraitRedoStack.isNotEmpty(),
+        canUndoLandscape = landscapeUndoStack.isNotEmpty(),
+        canRedoLandscape = landscapeRedoStack.isNotEmpty(),
+      )
+  }
+
+  fun moveHudElement(
+    landscape: Boolean,
+    id: HudElementId,
+    dxNorm: Float,
+    dyNorm: Float,
+    pushUndo: Boolean = false,
+  ) {
+    if (pushUndo) pushHudUndoSnapshot(landscape)
+    if (landscape) {
+      _hudLandscapeLayout.value = HudLayoutEngine.moveElement(_hudLandscapeLayout.value, id, dxNorm, dyNorm)
+    } else {
+      _hudPortraitLayout.value = HudLayoutEngine.moveElement(_hudPortraitLayout.value, id, dxNorm, dyNorm)
+    }
+  }
+
+  fun beginHudDragUndo(landscape: Boolean) {
+    pushHudUndoSnapshot(landscape)
+  }
+
+  fun scaleHudElement(landscape: Boolean, id: HudElementId, delta: Float) {
+    pushHudUndoSnapshot(landscape)
+    if (landscape) {
+      _hudLandscapeLayout.value = HudLayoutEngine.updateElementStyle(_hudLandscapeLayout.value, id, scaleDelta = delta)
+    } else {
+      _hudPortraitLayout.value = HudLayoutEngine.updateElementStyle(_hudPortraitLayout.value, id, scaleDelta = delta)
+    }
+  }
+
+  fun opacityHudElement(landscape: Boolean, id: HudElementId, delta: Float) {
+    pushHudUndoSnapshot(landscape)
+    if (landscape) {
+      _hudLandscapeLayout.value = HudLayoutEngine.updateElementStyle(_hudLandscapeLayout.value, id, opacityDelta = delta)
+    } else {
+      _hudPortraitLayout.value = HudLayoutEngine.updateElementStyle(_hudPortraitLayout.value, id, opacityDelta = delta)
+    }
+  }
+
+  fun toggleHudElementVisibility(landscape: Boolean, id: HudElementId) {
+    pushHudUndoSnapshot(landscape)
+    if (landscape) {
+      val cur = _hudLandscapeLayout.value.element(id)
+      _hudLandscapeLayout.value = HudLayoutEngine.updateElementStyle(_hudLandscapeLayout.value, id, visible = !cur.visible)
+    } else {
+      val cur = _hudPortraitLayout.value.element(id)
+      _hudPortraitLayout.value = HudLayoutEngine.updateElementStyle(_hudPortraitLayout.value, id, visible = !cur.visible)
+    }
+  }
+
+  fun toggleHudElementLock(landscape: Boolean, id: HudElementId) {
+    pushHudUndoSnapshot(landscape)
+    if (landscape) {
+      _hudLandscapeLayout.value = HudLayoutEngine.toggleLock(_hudLandscapeLayout.value, id)
+    } else {
+      _hudPortraitLayout.value = HudLayoutEngine.toggleLock(_hudPortraitLayout.value, id)
+    }
+  }
+
+  fun resetHudLayout(landscape: Boolean) {
+    pushHudUndoSnapshot(landscape)
+    if (landscape) {
+      _hudLandscapeLayout.value = HudLayoutEngine.defaultLandscape()
+    } else {
+      _hudPortraitLayout.value = HudLayoutEngine.defaultPortrait()
+    }
+  }
+
+  fun undoHudLayout(landscape: Boolean) {
+    val undo = if (landscape) landscapeUndoStack else portraitUndoStack
+    val redo = if (landscape) landscapeRedoStack else portraitRedoStack
+    if (undo.isEmpty()) return
+    val current = if (landscape) _hudLandscapeLayout.value else _hudPortraitLayout.value
+    redo.addLast(current)
+    val prev = undo.removeLast()
+    if (landscape) _hudLandscapeLayout.value = prev else _hudPortraitLayout.value = prev
+    refreshHudHistoryFlags()
+  }
+
+  fun redoHudLayout(landscape: Boolean) {
+    val undo = if (landscape) landscapeUndoStack else portraitUndoStack
+    val redo = if (landscape) landscapeRedoStack else portraitRedoStack
+    if (redo.isEmpty()) return
+    val current = if (landscape) _hudLandscapeLayout.value else _hudPortraitLayout.value
+    undo.addLast(current)
+    val next = redo.removeLast()
+    if (landscape) _hudLandscapeLayout.value = next else _hudPortraitLayout.value = next
+    refreshHudHistoryFlags()
+  }
+
+  fun onCockpitInterrupted(reason: String) {
+    keyboardHoldJob?.cancel()
+    keyboardHoldJob = null
+    manualStickActive = false
+    keyboardAxesActive = false
+    gamepadAxesActive = false
+    commandLimiter.reset()
+    hoverController.reset()
+    cancelAllAtcPointers()
+    interactionModeController.handleInterrupt(reason)
+    _interactionModeState.value = interactionModeController.state
+    inputMixer.neutralizeAll()
+    pushMixedSticks()
   }
 
   fun startMacro(preset: FlightMacroPreset) {
@@ -651,9 +1242,16 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   fun stopAllAutomation() {
     gravityHandler.setActive(false)
     automationCoordinator.stopAll(keepTrajectoryPreview = false)
+    inputMixer.neutralizeSource(InputSourceId.GRAVITY)
+    inputMixer.neutralizeSource(InputSourceId.SPINNER)
+    inputMixer.neutralizeSource(InputSourceId.TRAJECTORY)
+    if (interactionModeController.state.mode == CockpitInteractionMode.TRAJECTORY) {
+      interactionModeController.returnToPiloting(targetSelectActive = _targetSelectionEnabled.value)
+      _interactionModeState.value = interactionModeController.state
+    }
     rightStickX = 0f
     rightStickY = 0f
-    pushSticks()
+    pushMixedSticks()
   }
 
   private fun preemptAutomationOnManualInput() {
@@ -661,10 +1259,13 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     if (cur.spinnerMode != SpinnerMode.NONE || cur.activeSequenceTitle != null) {
       automationCoordinator.stopSpinner()
       automationCoordinator.stopSequence()
+      inputMixer.neutralizeSource(InputSourceId.SPINNER)
+      inputMixer.neutralizeSource(InputSourceId.TRAJECTORY)
     }
     if (cur.gravityActive && (manualStickActive || gamepadAxesActive || keyboardAxesActive)) {
       gravityHandler.setActive(false)
       automationCoordinator.setGravityActive(false)
+      inputMixer.neutralizeSource(InputSourceId.GRAVITY)
     }
   }
 
@@ -734,13 +1335,104 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     }
   }
 
-  private fun pushSticks() {
+  fun updateAtcAndGravityAdvancedSettings(
+    stickInputProfile: StickInputProfile,
+    atcSensitivity: Float,
+    atcDeadzone: Float,
+    atcMaxTravelDp: Float,
+    atcOpacity: Float,
+    atcInvertThrottle: Boolean,
+    atcInvertPitch: Boolean,
+    atcSwapZones: Boolean,
+    gravityPreset: GravityPreset,
+    gravityCurve: GravityResponseCurve,
+    gravitySensitivityPitch: Float,
+    gravitySensitivityRoll: Float,
+    gravityDeadzoneDeg: Float,
+    gravitySmoothingAlpha: Float,
+    gravitySlewRatePerSec: Float,
+    atcJoystickMode: JoystickMode = userPrefs.value.atcJoystickMode,
+    atcInvertRoll: Boolean = userPrefs.value.atcInvertRoll,
+    atcInvertYaw: Boolean = userPrefs.value.atcInvertYaw,
+  ) {
+    viewModelScope.launch {
+      prefsStore.updateAtcAndGravityAdvancedPrefs(
+        stickInputProfile = stickInputProfile,
+        atcSensitivity = atcSensitivity,
+        atcDeadzone = atcDeadzone,
+        atcMaxTravelDp = atcMaxTravelDp,
+        atcOpacity = atcOpacity,
+        atcInvertThrottle = atcInvertThrottle,
+        atcInvertPitch = atcInvertPitch,
+        atcSwapZones = atcSwapZones,
+        gravityPreset = gravityPreset,
+        gravityCurve = gravityCurve,
+        gravitySensitivityPitch = gravitySensitivityPitch,
+        gravitySensitivityRoll = gravitySensitivityRoll,
+        gravityDeadzoneDeg = gravityDeadzoneDeg,
+        gravitySmoothingAlpha = gravitySmoothingAlpha,
+        gravitySlewRatePerSec = gravitySlewRatePerSec,
+        atcJoystickMode = atcJoystickMode,
+        atcInvertRoll = atcInvertRoll,
+        atcInvertYaw = atcInvertYaw,
+      )
+    }
+  }
+
+  fun updateExperimentalFlightAllowed(allowed: Boolean) {
+    flightController.allowExperimentalFlightCommands = allowed
+    viewModelScope.launch { prefsStore.updateExperimentalFlightAllowed(allowed) }
+  }
+
+  fun toggleHoverAssist(enabled: Boolean) {
+    _hoverAssistEnabled.value = enabled
+    if (!enabled) {
+      hoverController.reset()
+      inputMixer.neutralizeSource(InputSourceId.VISION_SERVO)
+      pushMixedSticks()
+    }
+    visionCoordinator.setEnabled(_visionOverlayEnabled.value || _targetSelectionEnabled.value || enabled)
+    viewModelScope.launch { prefsStore.updateHoverAssistEnabled(enabled) }
+  }
+
+  private fun pushMixedSticks() {
+    val hwOverride =
+      when {
+        gamepadAxesActive -> InputSourceId.GAMEPAD
+        keyboardAxesActive -> InputSourceId.KEYBOARD
+        else -> null
+      }
+    val atcTouchActive =
+      _atcLeftRuntime.value.activePointerId != null || _atcRightRuntime.value.activePointerId != null
+    val visionServoEligible =
+      !manualStickActive &&
+        !atcTouchActive &&
+        !automationCoordinator.state.value.gravityActive &&
+        (_activeTargetTask.value != null || _hoverAssistEnabled.value)
+    val autoOverride =
+      when {
+        automationCoordinator.state.value.spinnerMode != SpinnerMode.NONE -> InputSourceId.SPINNER
+        automationCoordinator.state.value.activeSequenceTitle != null -> InputSourceId.TRAJECTORY
+        visionServoEligible -> InputSourceId.VISION_SERVO
+        else -> null
+      }
+    val mixed =
+      inputMixer.mix(
+        activeHardwareOverride = hwOverride,
+        activeAutomationOverride = autoOverride,
+      )
+    val limitedRoll = commandLimiter.limit(FlightAxis.ROLL, mixed.roll)
+    val limitedPitch = commandLimiter.limit(FlightAxis.PITCH, mixed.pitch)
+    val limitedThrottle = commandLimiter.limit(FlightAxis.THROTTLE, mixed.throttle)
+    val limitedYaw = commandLimiter.limit(FlightAxis.YAW, mixed.yaw)
     viewModelScope.launch {
       flightController.sendStickInput(
-        roll = rightStickX,
-        pitch = rightStickY,
-        throttle = leftStickY,
-        yaw = leftStickX,
+        roll = limitedRoll,
+        pitch = limitedPitch,
+        throttle = limitedThrottle,
+        yaw = limitedYaw,
+        preShapedRollPitch = mixed.isRollPitchPreShaped,
+        preShapedThrottleYaw = mixed.isThrottleYawPreShaped,
       )
     }
   }
@@ -754,6 +1446,8 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun disarmAircraft() {
+    commandLimiter.reset()
+    hoverController.reset()
     stopAllAutomation()
     stopTargetAction()
     flightController.disarm()
@@ -775,12 +1469,16 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   fun commandMotorStop() {
+    commandLimiter.reset()
+    hoverController.reset()
     stopAllAutomation()
     stopTargetAction()
     viewModelScope.launch { flightController.motorStop() }
   }
 
   fun commandEmergencyStop() {
+    commandLimiter.reset()
+    hoverController.reset()
     stopAllAutomation()
     stopTargetAction()
     videoPipeline.stopRecording()
@@ -809,6 +1507,31 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
 
   fun setHeadlessMode(enabled: Boolean) {
     viewModelScope.launch { flightController.setHeadlessMode(enabled) }
+  }
+
+  fun toggleLight() {
+    viewModelScope.launch { flightController.toggleLight() }
+  }
+
+  fun setFixedHeightMode(enabled: Boolean) {
+    viewModelScope.launch { flightController.setFixedHeightMode(enabled) }
+  }
+
+  fun setServoProbe(enabled: Boolean, byteIndex: Int, hexValue: Int) {
+    flightController.setServoProbe(enabled, byteIndex, hexValue)
+  }
+
+  fun sendCooingdvPassword(digits8: String): Boolean =
+    flightController.sendCooingdvPassword(digits8)
+
+  fun readDiagSummary(): String {
+    val summary = flightController.readDiagSummary()
+    _diagSummary.value = summary
+    return summary
+  }
+
+  fun refreshDiagSummary() {
+    _diagSummary.value = flightController.readDiagSummary()
   }
 
   fun tiltCamera(delta: Int) {
@@ -879,7 +1602,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       clearSelectedTarget()
       stopTargetAction()
     }
-    visionCoordinator.setEnabled(enabled || _targetSelectionEnabled.value)
+    visionCoordinator.setEnabled(enabled || _targetSelectionEnabled.value || _hoverAssistEnabled.value)
     val prefs = userPrefs.value
     viewModelScope.launch {
       prefsStore.updateVisionSettings(
@@ -903,7 +1626,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
       clearSelectedTarget()
       stopTargetAction()
     }
-    visionCoordinator.setEnabled(_visionOverlayEnabled.value || enabled)
+    visionCoordinator.setEnabled(_visionOverlayEnabled.value || enabled || _hoverAssistEnabled.value)
   }
 
   fun selectTargetAtNormalizedPoint(normX: Float, normY: Float): TrackedTarget? {
@@ -974,9 +1697,8 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   fun stopTargetAction() {
     if (_activeTargetTask.value != null) {
       _activeTargetTask.value = null
-      viewModelScope.launch {
-        flightController.sendStickInput(roll = 0f, pitch = 0f, throttle = leftStickY, yaw = 0f)
-      }
+      inputMixer.neutralizeSource(InputSourceId.VISION_SERVO)
+      pushMixedSticks()
     }
   }
 
@@ -984,42 +1706,101 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
     trackingLoopJob?.cancel()
     trackingLoopJob =
       viewModelScope.launch {
+        var visionServoActive = false
         while (true) {
           delay(50L)
-          val task = _activeTargetTask.value ?: continue
-          if (manualStickActive || automationState.value.hasActiveAutomation) continue
-          val targets = visionResult.value?.trackedTargets.orEmpty()
-          val matched = targets.firstOrNull { it.trackId == task.targetId }
-          val now = System.currentTimeMillis()
-          if (matched != null) {
-            _activeTargetTask.value = task.copy(lastSeenAtMs = now)
-            if (task.action != TargetActionType.TRACK_TARGET && flightState.value == FlightState.Flying) {
-              val cmd =
-                TargetActionEvaluator.computeServoCommand(
-                  task = task,
-                  target = matched,
-                  capabilities = _selectedEntry.value.capabilities,
+          val task = _activeTargetTask.value
+          val atcTouchActive =
+            _atcLeftRuntime.value.activePointerId != null || _atcRightRuntime.value.activePointerId != null
+          val blockedByManualOrAuto =
+            manualStickActive ||
+              atcTouchActive ||
+              gamepadAxesActive ||
+              keyboardAxesActive ||
+              automationState.value.hasActiveAutomation
+          if (blockedByManualOrAuto) {
+            if (visionServoActive) {
+              inputMixer.neutralizeSource(InputSourceId.VISION_SERVO)
+              visionServoActive = false
+              pushMixedSticks()
+            }
+            continue
+          }
+
+          if (task != null) {
+            val targets = visionResult.value?.trackedTargets.orEmpty()
+            val matched = targets.firstOrNull { it.trackId == task.targetId }
+            val now = System.currentTimeMillis()
+            if (matched != null) {
+              _activeTargetTask.value = task.copy(lastSeenAtMs = now)
+              if (task.action != TargetActionType.TRACK_TARGET && flightState.value == FlightState.Flying) {
+                val cmd =
+                  TargetActionEvaluator.computeServoCommand(
+                    task = task,
+                    target = matched,
+                    capabilities = _selectedEntry.value.capabilities,
+                  )
+                inputMixer.submit(
+                  source = InputSourceId.VISION_SERVO,
+                  axes =
+                    mapOf(
+                      FlightAxis.ROLL to cmd.roll,
+                      FlightAxis.PITCH to cmd.pitch,
+                      FlightAxis.YAW to cmd.yaw,
+                    ),
+                  active = true,
+                  staleTimeoutMs = 350L,
                 )
-              flightController.sendStickInput(
-                roll = cmd.roll,
-                pitch = cmd.pitch,
-                throttle = leftStickY,
-                yaw = cmd.yaw,
-              )
-              cmd.cameraTiltDelta?.let { delta ->
-                if (delta != 0 && now - lastVisionTiltAtMs >= 350L) {
-                  lastVisionTiltAtMs = now
-                  flightController.tiltCamera(delta)
+                visionServoActive = true
+                pushMixedSticks()
+                cmd.cameraTiltDelta?.let { delta ->
+                  if (delta != 0 && now - lastVisionTiltAtMs >= 350L) {
+                    lastVisionTiltAtMs = now
+                    flightController.tiltCamera(delta)
+                  }
                 }
               }
+            } else {
+              val lostElapsedSec = (now - task.lastSeenAtMs) / 1000f
+              if (lostElapsedSec > task.config.lostTargetTimeoutSec) {
+                stopTargetAction()
+                visionServoActive = false
+              } else if (visionServoActive) {
+                inputMixer.neutralizeSource(InputSourceId.VISION_SERVO)
+                visionServoActive = false
+                pushMixedSticks()
+              }
             }
-          } else {
-            val lostElapsedSec = (now - task.lastSeenAtMs) / 1000f
-            if (lostElapsedSec > task.config.lostTargetTimeoutSec) {
-              stopTargetAction()
-            } else if (task.action != TargetActionType.TRACK_TARGET && flightState.value == FlightState.Flying) {
-              flightController.sendStickInput(roll = 0f, pitch = 0f, throttle = leftStickY, yaw = 0f)
+          } else if (_hoverAssistEnabled.value && flightState.value == FlightState.Flying) {
+            val hoverOut =
+              hoverController.update(
+                enabled = true,
+                result = visionResult.value,
+                nowMs = System.currentTimeMillis(),
+              )
+            if (hoverOut.active) {
+              inputMixer.submit(
+                source = InputSourceId.VISION_SERVO,
+                axes =
+                  mapOf(
+                    FlightAxis.ROLL to hoverOut.roll,
+                    FlightAxis.PITCH to hoverOut.pitch,
+                    FlightAxis.YAW to hoverOut.yaw,
+                  ),
+                active = true,
+                staleTimeoutMs = 350L,
+              )
+              visionServoActive = true
+              pushMixedSticks()
+            } else if (visionServoActive) {
+              inputMixer.neutralizeSource(InputSourceId.VISION_SERVO)
+              visionServoActive = false
+              pushMixedSticks()
             }
+          } else if (visionServoActive) {
+            inputMixer.neutralizeSource(InputSourceId.VISION_SERVO)
+            visionServoActive = false
+            pushMixedSticks()
           }
         }
       }
@@ -1146,6 +1927,7 @@ class AutopilotViewModel(application: Application) : AndroidViewModel(applicatio
   override fun onCleared() {
     super.onCleared()
     gravityHandler.setActive(false)
+    gravityWatchdogJob?.cancel()
     automationCoordinator.stopAll()
     keyboardHoldJob?.cancel()
     trackingLoopJob?.cancel()

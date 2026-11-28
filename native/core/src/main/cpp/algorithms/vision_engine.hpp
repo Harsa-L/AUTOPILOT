@@ -41,6 +41,10 @@ struct OpticalFlowSummary {
   std::vector<FlowVector> grid_vectors;
   float global_dx_norm = 0.0f;
   float global_dy_norm = 0.0f;
+  float median_dx_norm = 0.0f;
+  float median_dy_norm = 0.0f;
+  float rotational_yaw_omega = 0.0f;
+  int32_t valid_vector_count = 0;
 };
 
 /**

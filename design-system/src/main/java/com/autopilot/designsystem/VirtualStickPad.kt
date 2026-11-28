@@ -46,6 +46,7 @@ fun VirtualStickPad(
   size: Dp? = null,
   tag: String = "virtual_stick",
   hudOverlay: Boolean = false,
+  enabled: Boolean = true,
   onTouchActiveChanged: (Boolean) -> Unit = {},
 ) {
   val theme = LocalResolvedTheme.current
@@ -78,7 +79,8 @@ fun VirtualStickPad(
           .semantics {
             contentDescription = "$label flight stick ($horizontalAxisLabel / $verticalAxisLabel)"
           }
-          .pointerInput(autoCenterY) {
+          .pointerInput(autoCenterY, enabled) {
+            if (!enabled) return@pointerInput
             detectDragGestures(
               onDragStart = {
                 onTouchActiveChanged(true)

@@ -1,5 +1,6 @@
 package com.example.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -7,8 +8,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.Close
@@ -35,9 +37,10 @@ import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Gesture
+import androidx.compose.material.icons.filled.Height
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.automirrored.filled.RotateRight
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.RemoveRedEye
 import androidx.compose.material.icons.filled.ScreenRotation
@@ -78,9 +81,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -94,13 +100,22 @@ import com.autopilot.designsystem.VirtualStickPad
 import com.autopilot.drone.protocolapi.DroneCapabilities
 import com.autopilot.drone.protocolapi.FlipDirection
 import com.autopilot.flight.control.FlightState
+import com.autopilot.flight.input.StickInputProfile
+import com.autopilot.flight.interaction.CockpitInteractionMode
+import com.autopilot.flight.touch.TouchPointPx
 import com.autopilot.video.MvFilterPreset
 import com.autopilot.video.VideoCaptureState
 import com.autopilot.video.VideoStreamState
 import com.autopilot.vision.TrackedTarget
 import com.autopilot.vision.VisionFrameResult
 import com.example.input.SpinnerMode
+import com.example.ui.controls.GravityIndicator
+import com.example.ui.controls.HudEditorOverlay
+import com.example.ui.controls.TouchZoneOverlay
+import com.example.ui.hud.HudElementConfig
+import com.example.ui.hud.HudElementId
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -127,9 +142,21 @@ fun FlightCockpitScreen(
   val speedTier by viewModel.speedTier.collectAsStateWithLifecycle()
   val fastFly by viewModel.fastFly.collectAsStateWithLifecycle()
   val headlessMode by viewModel.headlessMode.collectAsStateWithLifecycle()
+  val fixedHeightMode by viewModel.fixedHeightMode.collectAsStateWithLifecycle()
+  val linkRxVerified by viewModel.linkRxVerified.collectAsStateWithLifecycle()
+  val hoverAssistEnabled by viewModel.hoverAssistEnabled.collectAsStateWithLifecycle()
   val sensitivity by viewModel.sensitivity.collectAsStateWithLifecycle()
   val automationState by viewModel.automationState.collectAsStateWithLifecycle()
   val userPrefs by viewModel.userPrefs.collectAsStateWithLifecycle()
+  val interactionModeState by viewModel.interactionModeState.collectAsStateWithLifecycle()
+  val atcLeftRuntime by viewModel.atcLeftRuntime.collectAsStateWithLifecycle()
+  val atcRightRuntime by viewModel.atcRightRuntime.collectAsStateWithLifecycle()
+  val gravityStatus by viewModel.gravityStatus.collectAsStateWithLifecycle()
+  val hudPortraitLayout by viewModel.hudPortraitLayout.collectAsStateWithLifecycle()
+  val hudLandscapeLayout by viewModel.hudLandscapeLayout.collectAsStateWithLifecycle()
+  val selectedHudElement by viewModel.selectedHudElement.collectAsStateWithLifecycle()
+  val hudHistoryFlags by viewModel.hudHistoryFlags.collectAsStateWithLifecycle()
+  val deviceSafetyEvaluation by viewModel.deviceSafetyEvaluation.collectAsStateWithLifecycle()
 
   var showEmergencyDialog by remember { mutableStateOf(false) }
   var showAircraftSheet by remember { mutableStateOf(false) }
@@ -137,22 +164,37 @@ fun FlightCockpitScreen(
   var showTrimDialog by remember { mutableStateOf(false) }
   var targetModalSubject by remember { mutableStateOf<TrackedTarget?>(null) }
   var viewportSize by remember { mutableStateOf(IntSize.Zero) }
-  var drawingPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
 
   val caps = selectedEntry.capabilities
   val isConnected = flightState != FlightState.Disconnected
   val activeFrame = videoState as? VideoStreamState.ActiveFrame
+  val pilotingModeActive = interactionModeState.mode == CockpitInteractionMode.PILOTING
+  val atcOverlayEnabled =
+    !caps.isVideoOnly &&
+      pilotingModeActive &&
+      (userPrefs.stickInputProfile == StickInputProfile.ATC_DUAL_TOUCH ||
+        userPrefs.stickInputProfile == StickInputProfile.ATC_HYBRID_GRAVITY)
+  val showFixedSticks =
+    !caps.isVideoOnly && userPrefs.stickInputProfile == StickInputProfile.FIXED_STICKS
+
+  BackHandler(
+    enabled =
+      interactionModeState.mode != CockpitInteractionMode.PILOTING ||
+        automationState.trajectoryDrawMode,
+  ) {
+    when {
+      interactionModeState.mode == CockpitInteractionMode.HUD_EDITING ->
+        viewModel.exitHudEditingMode()
+      automationState.trajectoryDrawMode ||
+        interactionModeState.mode == CockpitInteractionMode.TRAJECTORY ->
+        viewModel.setTrajectoryDrawMode(false)
+    }
+  }
 
   LaunchedEffect(captureState.lastNotice) {
     if (captureState.lastNotice != null) {
       delay(2600L)
       viewModel.clearCaptureNotice()
-    }
-  }
-
-  LaunchedEffect(automationState.trajectoryDrawMode) {
-    if (!automationState.trajectoryDrawMode) {
-      drawingPoints = emptyList()
     }
   }
 
@@ -167,44 +209,116 @@ fun FlightCockpitScreen(
           .onSizeChanged { viewportSize = it }
           .pointerInput(
             automationState.trajectoryDrawMode,
+            interactionModeState.mode,
             viewportSize,
           ) {
-            if (!automationState.trajectoryDrawMode) return@pointerInput
-            detectDragGestures(
-              onDragStart = { start ->
-                val w = viewportSize.width.coerceAtLeast(1).toFloat()
-                val h = viewportSize.height.coerceAtLeast(1).toFloat()
-                val pt = Offset((start.x / w).coerceIn(0f, 1f), (start.y / h).coerceIn(0f, 1f))
-                drawingPoints = listOf(pt)
-                viewModel.updatePendingTrajectory(drawingPoints)
-              },
-              onDrag = { change, _ ->
-                change.consume()
-                val w = viewportSize.width.coerceAtLeast(1).toFloat()
-                val h = viewportSize.height.coerceAtLeast(1).toFloat()
-                val pt =
-                  Offset(
-                    (change.position.x / w).coerceIn(0f, 1f),
-                    (change.position.y / h).coerceIn(0f, 1f),
-                  )
-                drawingPoints = drawingPoints + pt
-                viewModel.updatePendingTrajectory(drawingPoints)
-              },
-            )
+            if (!automationState.trajectoryDrawMode ||
+              interactionModeState.mode != CockpitInteractionMode.TRAJECTORY
+            ) {
+              return@pointerInput
+            }
+            awaitEachGesture {
+              val down = awaitFirstDown(requireUnconsumed = false)
+              val pid = down.id.value.toInt()
+              val w = viewportSize.width.coerceAtLeast(1).toFloat()
+              val h = viewportSize.height.coerceAtLeast(1).toFloat()
+              val startNorm =
+                Offset((down.position.x / w).coerceIn(0f, 1f), (down.position.y / h).coerceIn(0f, 1f))
+              if (!viewModel.onTrajectoryPointerDown(pid, startNorm)) {
+                return@awaitEachGesture
+              }
+              down.consume()
+              while (true) {
+                val event = awaitPointerEvent()
+                var activePressed = false
+                event.changes.forEach { change ->
+                  if (change.id.value.toInt() == pid) {
+                    if (change.pressed) {
+                      activePressed = true
+                      val pt =
+                        Offset(
+                          (change.position.x / w).coerceIn(0f, 1f),
+                          (change.position.y / h).coerceIn(0f, 1f),
+                        )
+                      if (viewModel.onTrajectoryPointerMove(pid, pt)) {
+                        change.consume()
+                      }
+                    } else {
+                      viewModel.onTrajectoryPointerUpOrCancel(pid)
+                      change.consume()
+                    }
+                  }
+                }
+                if (!activePressed) break
+              }
+            }
           }
           .pointerInput(
             targetSelectionEnabled,
             automationState.trajectoryDrawMode,
+            interactionModeState.mode,
             viewportSize,
             activeFrame?.bitmap?.width,
             activeFrame?.bitmap?.height,
           ) {
-            if (!targetSelectionEnabled || automationState.trajectoryDrawMode) return@pointerInput
-            detectTapGestures(
-              onTap = { tap ->
+            if (!targetSelectionEnabled ||
+              automationState.trajectoryDrawMode ||
+              interactionModeState.mode != CockpitInteractionMode.PILOTING
+            ) {
+              return@pointerInput
+            }
+            awaitEachGesture {
+              val down = awaitFirstDown(requireUnconsumed = true)
+              val pid = down.id.value.toInt()
+              if (!viewModel.onTargetPointerDown(pid)) {
+                viewModel.onTargetPointerUpOrCancel(pid)
+                return@awaitEachGesture
+              }
+              val downPos = down.position
+              val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+              val touchSlop = viewConfiguration.touchSlop
+              var movedTooFar = false
+              val releasedPos: Offset? =
+                withTimeoutOrNull(longPressTimeout) {
+                  var liftedAt: Offset? = null
+                  while (liftedAt == null) {
+                    val event = awaitPointerEvent()
+                    val ch = event.changes.firstOrNull { it.id.value.toInt() == pid }
+                    if (ch == null || !ch.pressed) {
+                      liftedAt = ch?.position ?: downPos
+                    } else if ((ch.position - downPos).getDistance() > touchSlop) {
+                      movedTooFar = true
+                    }
+                  }
+                  liftedAt
+                }
+              if (releasedPos == null) {
+                if (!movedTooFar) {
+                  val norm =
+                    mapTapToNormalizedFrame(
+                      tap = downPos,
+                      viewport = viewportSize,
+                      frameWidth = activeFrame?.bitmap?.width ?: 0,
+                      frameHeight = activeFrame?.bitmap?.height ?: 0,
+                    )
+                  val currentTargets = visionResult?.trackedTargets.orEmpty()
+                  val hit =
+                    if (norm != null) viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
+                    else null
+                  val selected =
+                    hit ?: selectedTargetId?.let { id -> currentTargets.firstOrNull { it.trackId == id } }
+                  if (selected != null) {
+                    targetModalSubject = selected
+                  }
+                }
+                while (true) {
+                  val event = awaitPointerEvent()
+                  if (event.changes.none { it.id.value.toInt() == pid && it.pressed }) break
+                }
+              } else if (!movedTooFar) {
                 val norm =
                   mapTapToNormalizedFrame(
-                    tap = tap,
+                    tap = releasedPos,
                     viewport = viewportSize,
                     frameWidth = activeFrame?.bitmap?.width ?: 0,
                     frameHeight = activeFrame?.bitmap?.height ?: 0,
@@ -212,26 +326,9 @@ fun FlightCockpitScreen(
                 if (norm != null) {
                   viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
                 }
-              },
-              onLongPress = { tap ->
-                val norm =
-                  mapTapToNormalizedFrame(
-                    tap = tap,
-                    viewport = viewportSize,
-                    frameWidth = activeFrame?.bitmap?.width ?: 0,
-                    frameHeight = activeFrame?.bitmap?.height ?: 0,
-                  )
-                val currentTargets = visionResult?.trackedTargets.orEmpty()
-                val hit =
-                  if (norm != null) viewModel.selectTargetAtNormalizedPoint(norm.x, norm.y)
-                  else null
-                val selected =
-                  hit ?: selectedTargetId?.let { id -> currentTargets.firstOrNull { it.trackId == id } }
-                if (selected != null) {
-                  targetModalSubject = selected
-                }
-              },
-            )
+              }
+              viewModel.onTargetPointerUpOrCancel(pid)
+            }
           },
     ) {
       when (val video = videoState) {
@@ -278,7 +375,10 @@ fun FlightCockpitScreen(
       }
 
       if (automationState.trajectoryDrawMode || automationState.pendingTrajectoryPoints.isNotEmpty()) {
-        val pts = automationState.pendingTrajectoryPoints
+        val cleaned = automationState.cleanedTrajectory
+        val pts =
+          cleaned?.cleanedPoints?.map { Offset(it.x, it.y) }
+            ?: automationState.pendingTrajectoryPoints
         Canvas(modifier = Modifier.fillMaxSize().testTag("trajectory_draw_canvas")) {
           if (pts.size >= 2) {
             val path =
@@ -293,6 +393,13 @@ fun FlightCockpitScreen(
               color = theme.colors.accent,
               style = Stroke(width = 6f, cap = StrokeCap.Round, join = StrokeJoin.Round),
             )
+            cleaned?.waypoints?.forEach { wp ->
+              drawCircle(
+                color = Color.White.copy(alpha = 0.72f),
+                radius = 5f,
+                center = Offset(wp.point.x * size.width, wp.point.y * size.height),
+              )
+            }
             drawCircle(
               color = theme.colors.accent,
               radius = 10f,
@@ -306,14 +413,38 @@ fun FlightCockpitScreen(
           }
         }
       }
+
+      TouchZoneOverlay(
+        enabled = atcOverlayEnabled,
+        interactionMode = interactionModeState.mode,
+        viewportSize = viewportSize,
+        leftRuntime = atcLeftRuntime,
+        rightRuntime = atcRightRuntime,
+        onPickZone = { nx, ny -> viewModel.pickAtcZone(nx, ny) },
+        onRouteDown = { pid, zone, pos, w, h -> viewModel.onAtcPointerDown(pid, zone, pos, w, h) },
+        onRouteMove = { pid, pos -> viewModel.onAtcPointerMove(pid, pos) },
+        onRouteUpOrCancel = { pid -> viewModel.onAtcPointerUpOrCancel(pid) },
+        onCancelAll = { viewModel.cancelAllAtcPointers() },
+        modifier = Modifier.fillMaxSize(),
+      )
     }
 
     // Layer 2: Safe-Area Bounded Translucent Flight HUD Overlay (<=30% area, >=70% clear video, zero scrolling)
     BoxWithConstraints(
       modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
+      val density = LocalDensity.current
+      val marginPx = with(density) { 6.dp.roundToPx() }
       val isWideLayout = maxWidth >= 560.dp
       val isShortHeight = maxHeight < 480.dp
+      val activeHudLayout = if (isWideLayout) hudLandscapeLayout else hudPortraitLayout
+      val topLeftHud = activeHudLayout.element(HudElementId.TOP_LEFT_STATUS)
+      val topRightHud = activeHudLayout.element(HudElementId.TOP_RIGHT_ACTIONS)
+      val gravityHud = activeHudLayout.element(HudElementId.GRAVITY_INDICATOR)
+      val modifiersHud = activeHudLayout.element(HudElementId.CAPABILITY_MODIFIERS)
+      val primaryHud = activeHudLayout.element(HudElementId.PRIMARY_ACTIONS)
+      val leftStickHud = activeHudLayout.element(HudElementId.LEFT_STICK)
+      val rightStickHud = activeHudLayout.element(HudElementId.RIGHT_STICK)
 
       val stickSize =
         if (isWideLayout) {
@@ -326,17 +457,17 @@ fun FlightCockpitScreen(
           minOf(maxHeight * 0.16f, (maxWidth - 40.dp) * 0.36f).coerceIn(88.dp, 132.dp)
         }
 
-      // Top Minimal Translucent HUD Row (No Title Bar)
-      Row(
-        modifier =
-          Modifier.fillMaxWidth()
-            .align(Alignment.TopCenter)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
+      // 1. Top-Left Aircraft Status & Connect Cluster (dynamically placed by HudLayoutConfig)
+      HudPlacedSlot(config = topLeftHud, marginPx = marginPx) {
         Row(
-          modifier = Modifier.weight(1f, fill = false).padding(end = 6.dp).testTag("hud_top_left"),
+          modifier =
+            Modifier.widthIn(max = if (isWideLayout) 280.dp else 210.dp)
+              .graphicsLayer(
+                alpha = topLeftHud.opacity,
+                scaleX = topLeftHud.scale,
+                scaleY = topLeftHud.scale,
+              )
+              .testTag("hud_top_left"),
           horizontalArrangement = Arrangement.spacedBy(5.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -348,8 +479,8 @@ fun FlightCockpitScreen(
               val linkSuffix =
                 when {
                   caps.isVideoOnly -> "VID"
-                  (telemetry?.controlPacketsReceived ?: 0L) > 0L -> "RX"
-                  else -> "1W"
+                  linkRxVerified -> "RX OK"
+                  else -> "NO RX"
                 }
               val batSuffix = telemetry?.batteryPercent?.let { " $it%" }.orEmpty()
               "$shortName · $linkSuffix$batSuffix"
@@ -369,7 +500,10 @@ fun FlightCockpitScreen(
             },
           )
         }
+      }
 
+      // 2. Top-Right Camera & Tools Cluster
+      HudPlacedSlot(config = topRightHud, marginPx = marginPx) {
         HudTopIconCluster(
           hasActiveVideo = activeFrame != null,
           captureState = captureState,
@@ -380,39 +514,102 @@ fun FlightCockpitScreen(
           onToggleTargetSelect = { viewModel.toggleTargetSelection(!targetSelectionEnabled) },
           onOpenVision = onOpenVision,
           onOpenSettings = onOpenSettings,
-          modifier = Modifier.testTag("hud_top_right"),
+          modifier =
+            Modifier.graphicsLayer(
+                alpha = topRightHud.opacity,
+                scaleX = topRightHud.scale,
+                scaleY = topRightHud.scale,
+              )
+              .testTag("hud_top_right"),
         )
       }
 
-      // Transient Micro-Banner directly below top cluster (only when active target, capture notice, or alert exists)
+      // 3. Dedicated Gravity Artificial Horizon Indicator (independent of transient banners)
+      if (automationState.gravityActive && gravityHud.visible) {
+        HudPlacedSlot(config = gravityHud, marginPx = marginPx) {
+          GravityIndicator(
+            tiltRollNorm = gravityStatus.rollNorm,
+            tiltPitchNorm = gravityStatus.pitchNorm,
+            calibration = gravityStatus.calibration,
+            stale = gravityStatus.stale,
+            presetLabel = userPrefs.gravityPreset.label,
+            onRecenter = { viewModel.recenterGravity() },
+            modifier =
+              Modifier.graphicsLayer(
+                alpha = gravityHud.opacity,
+                scaleX = gravityHud.scale,
+                scaleY = gravityHud.scale,
+              ),
+          )
+        }
+      }
+
+      // Transient Micro-Banner directly below top cluster (only when active task, capture notice, or alert exists)
       val topStatusBannerModifier =
         Modifier.align(Alignment.TopCenter)
-          .padding(top = 52.dp, start = 12.dp, end = 12.dp)
-          .widthIn(max = 380.dp)
+          .padding(
+            top = if (automationState.gravityActive && gravityHud.visible) 96.dp else 52.dp,
+            start = 12.dp,
+            end = 12.dp,
+          )
+          .widthIn(max = 400.dp)
 
       if (automationState.trajectoryDrawMode || automationState.pendingTrajectoryPoints.isNotEmpty()) {
-        val hasPath = automationState.pendingTrajectoryPoints.size >= 2
-        val canFlyPath = isConnected && (flightState == FlightState.Armed || flightState == FlightState.Flying)
+        val cleaned = automationState.cleanedTrajectory
+        val hasPath = (cleaned?.waypoints?.isNotEmpty() == true) || automationState.pendingTrajectoryPoints.size >= 2
+        val protocolSupportsTrajectory = deviceSafetyEvaluation.supportsTrajectoryExecution
+        val canFlyPath =
+          protocolSupportsTrajectory &&
+            isConnected &&
+            (flightState == FlightState.Armed || flightState == FlightState.Flying)
         HudTranslucentPill(modifier = topStatusBannerModifier, highlighted = true) {
           Row(
             modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
           ) {
-            Text(
-              text = if (hasPath) "Trajectory Ready" else "Draw path on video",
-              style = MaterialTheme.typography.labelSmall,
-              color = Color.White,
-              maxLines = 1,
-              modifier = Modifier.weight(1f, fill = false),
-            )
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+              Text(
+                text =
+                  when {
+                    !hasPath -> "Draw path on video"
+                    !protocolSupportsTrajectory -> "Preview Only · ${cleaned?.waypoints?.size ?: 0} wp"
+                    else -> "Trajectory Ready · ${cleaned?.waypoints?.size ?: 0} wp"
+                  },
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+              if (hasPath && !protocolSupportsTrajectory && deviceSafetyEvaluation.trajectoryBlockReason != null) {
+                Text(
+                  text = "Closed-loop flight unverified on this protocol",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = theme.colors.statusWarning,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
             if (hasPath) {
               TextButton(
                 onClick = { viewModel.executeTrajectory() },
                 enabled = canFlyPath,
                 modifier = Modifier.testTag("trajectory_run_button"),
               ) {
-                Text("Fly", style = MaterialTheme.typography.labelSmall, color = theme.colors.accent)
+                Text(
+                  text = if (protocolSupportsTrajectory) "Fly" else "Preview",
+                  style = MaterialTheme.typography.labelSmall,
+                  color = if (canFlyPath) theme.colors.accent else Color.White.copy(alpha = 0.45f),
+                )
+              }
+            }
+            if (automationState.trajectoryDrawMode) {
+              TextButton(
+                onClick = { viewModel.setTrajectoryDrawMode(false) },
+                modifier = Modifier.testTag("trajectory_done_button"),
+              ) {
+                Text("Done", style = MaterialTheme.typography.labelSmall, color = theme.colors.accent)
               }
             }
             TextButton(
@@ -451,10 +648,8 @@ fun FlightCockpitScreen(
             }
           }
         }
-      } else if (automationState.spinnerMode != SpinnerMode.NONE || automationState.gravityActive) {
-        val statusText =
-          if (automationState.spinnerMode != SpinnerMode.NONE) "${automationState.spinnerMode.label} Active"
-          else "Gravity Tilt Active"
+      } else if (automationState.spinnerMode != SpinnerMode.NONE) {
+        val statusText = "${automationState.spinnerMode.label} Active"
         HudTranslucentPill(modifier = topStatusBannerModifier, highlighted = true) {
           Row(
             modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
@@ -575,168 +770,139 @@ fun FlightCockpitScreen(
         }
       }
 
-      // Bottom Translucent HUD Controls (All visible at once, zero scrolling, no opaque cockpit box)
-      if (isWideLayout) {
-        Row(
-          modifier =
-            Modifier.fillMaxWidth()
-              .align(Alignment.BottomCenter)
-              .padding(horizontal = 10.dp, vertical = 6.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.Bottom,
-        ) {
-          if (!caps.isVideoOnly) {
-            VirtualStickPad(
-              label = "THR / YAW",
-              horizontalAxisLabel = "Yaw",
-              verticalAxisLabel = "Throttle",
-              autoCenterY = false,
-              onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
-              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-              size = stickSize,
-              hudOverlay = true,
-              tag = "left_stick_pad",
-            )
-          }
-
-          Box(
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            contentAlignment = Alignment.BottomCenter,
-          ) {
-            Column(
-              modifier = Modifier.widthIn(max = 360.dp).fillMaxWidth(),
-              horizontalAlignment = Alignment.CenterHorizontally,
-              verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-              HudCapabilityModifiersRow(
-                caps = caps,
-                flightState = flightState,
-                speedTier = speedTier,
-                fastFly = fastFly,
-                headlessMode = headlessMode,
-                isConnected = isConnected,
-                activeCameraIndex = activeCameraIndex,
-                trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
-                modesActive = automationState.hasActiveAutomation || automationState.trajectoryDrawMode,
-                onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
-                onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
-                onFlip360 = { dir -> viewModel.commandFlip360(dir.wireId) },
-                onTiltCamera = { viewModel.tiltCamera(it) },
-                onSwitchCamera = { viewModel.switchCamera() },
-                onCalibrateGyro = { viewModel.commandCalibrateGyro() },
-                onOpenTrim = { showTrimDialog = true },
-                onOpenFlightModes = { showFlightModesSheet = true },
-                modifier = Modifier.fillMaxWidth().testTag("hud_modifiers_row"),
-              )
-
-              HudPrimaryActionsRow(
-                flightState = flightState,
-                caps = caps,
-                isConnected = isConnected,
-                onArmOrReset = {
-                  if (flightState == FlightState.Emergency) viewModel.disarmAircraft()
-                  else viewModel.armAircraft()
-                },
-                onTakeoff = { viewModel.commandTakeoff() },
-                onLand = { viewModel.commandControlledLand() },
-                onStop = { viewModel.commandMotorStop() },
-                onEmergencyClick = { showEmergencyDialog = true },
-                modifier = Modifier.fillMaxWidth().testTag("hud_actions_row"),
-              )
-            }
-          }
-
-          if (!caps.isVideoOnly) {
-            VirtualStickPad(
-              label = "ROLL / PITCH",
-              horizontalAxisLabel = "Roll",
-              verticalAxisLabel = "Pitch",
-              autoCenterY = true,
-              onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
-              onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-              size = stickSize,
-              hudOverlay = true,
-              tag = "right_stick_pad",
-            )
-          }
-        }
-      } else {
-        // Portrait Compact Overlay: Modifiers + Primary Flight Actions + Dual Translucent Sticks
-        Column(
-          modifier =
-            Modifier.fillMaxWidth()
-              .align(Alignment.BottomCenter)
-              .padding(horizontal = 8.dp, vertical = 6.dp),
-          verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
+      // 4. Capability Modifiers Row (dynamically positioned via HudElementId.CAPABILITY_MODIFIERS)
+      val centerHudMaxWidth = if (isWideLayout) 360.dp else (maxWidth - 20.dp).coerceAtLeast(240.dp)
+      if (modifiersHud.visible) {
+        HudPlacedSlot(config = modifiersHud, marginPx = marginPx) {
           HudCapabilityModifiersRow(
             caps = caps,
             flightState = flightState,
             speedTier = speedTier,
             fastFly = fastFly,
             headlessMode = headlessMode,
+            fixedHeightMode = fixedHeightMode,
             isConnected = isConnected,
             activeCameraIndex = activeCameraIndex,
             trimActive = sensitivity.trimRoll != 0f || sensitivity.trimPitch != 0f,
-            modesActive = automationState.hasActiveAutomation || automationState.trajectoryDrawMode,
+            modesActive =
+              automationState.hasActiveAutomation ||
+                automationState.trajectoryDrawMode ||
+                hoverAssistEnabled,
             onCycleSpeedTier = { viewModel.setSpeedTier((speedTier + 1) % 3) },
             onToggleHeadless = { viewModel.setHeadlessMode(!headlessMode) },
+            onToggleLight = { viewModel.toggleLight() },
+            onToggleFixedHeight = { viewModel.setFixedHeightMode(!fixedHeightMode) },
             onFlip360 = { dir -> viewModel.commandFlip360(dir.wireId) },
             onTiltCamera = { viewModel.tiltCamera(it) },
             onSwitchCamera = { viewModel.switchCamera() },
             onCalibrateGyro = { viewModel.commandCalibrateGyro() },
             onOpenTrim = { showTrimDialog = true },
             onOpenFlightModes = { showFlightModesSheet = true },
-            modifier = Modifier.fillMaxWidth().testTag("hud_modifiers_row"),
+            modifier =
+              Modifier.widthIn(max = centerHudMaxWidth)
+                .graphicsLayer(
+                  alpha = modifiersHud.opacity,
+                  scaleX = modifiersHud.scale,
+                  scaleY = modifiersHud.scale,
+                )
+                .testTag("hud_modifiers_row"),
           )
-
-          HudPrimaryActionsRow(
-            flightState = flightState,
-            caps = caps,
-            isConnected = isConnected,
-            onArmOrReset = {
-              if (flightState == FlightState.Emergency) viewModel.disarmAircraft()
-              else viewModel.armAircraft()
-            },
-            onTakeoff = { viewModel.commandTakeoff() },
-            onLand = { viewModel.commandControlledLand() },
-            onStop = { viewModel.commandMotorStop() },
-            onEmergencyClick = { showEmergencyDialog = true },
-            modifier = Modifier.fillMaxWidth().testTag("hud_actions_row"),
-          )
-
-          if (!caps.isVideoOnly) {
-            Row(
-              modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-              horizontalArrangement = Arrangement.SpaceBetween,
-              verticalAlignment = Alignment.Bottom,
-            ) {
-              VirtualStickPad(
-                label = "THR / YAW",
-                horizontalAxisLabel = "Yaw",
-                verticalAxisLabel = "Throttle",
-                autoCenterY = false,
-                onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
-                onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-                size = stickSize,
-                hudOverlay = true,
-                tag = "left_stick_pad",
-              )
-
-              VirtualStickPad(
-                label = "ROLL / PITCH",
-                horizontalAxisLabel = "Roll",
-                verticalAxisLabel = "Pitch",
-                autoCenterY = true,
-                onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
-                onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
-                size = stickSize,
-                hudOverlay = true,
-                tag = "right_stick_pad",
-              )
-            }
-          }
         }
+      }
+
+      // 5. Primary Actions Row (dynamically positioned via HudElementId.PRIMARY_ACTIONS)
+      HudPlacedSlot(config = primaryHud, marginPx = marginPx) {
+        HudPrimaryActionsRow(
+          flightState = flightState,
+          caps = caps,
+          isConnected = isConnected,
+          onArmOrReset = {
+            if (flightState == FlightState.Emergency) viewModel.disarmAircraft()
+            else viewModel.armAircraft()
+          },
+          onTakeoff = { viewModel.commandTakeoff() },
+          onLand = { viewModel.commandControlledLand() },
+          onStop = { viewModel.commandMotorStop() },
+          onEmergencyClick = { showEmergencyDialog = true },
+          modifier =
+            Modifier.widthIn(max = centerHudMaxWidth)
+              .fillMaxWidth()
+              .graphicsLayer(
+                alpha = primaryHud.opacity,
+                scaleX = primaryHud.scale,
+                scaleY = primaryHud.scale,
+              )
+              .testTag("hud_actions_row"),
+        )
+      }
+
+      // 6 & 7. Fixed Sticks (dynamically positioned via LEFT_STICK / RIGHT_STICK)
+      if (showFixedSticks && leftStickHud.visible) {
+        HudPlacedSlot(config = leftStickHud, marginPx = marginPx) {
+          VirtualStickPad(
+            label = "THR / YAW",
+            horizontalAxisLabel = "Yaw",
+            verticalAxisLabel = "Throttle",
+            autoCenterY = false,
+            enabled = pilotingModeActive,
+            onAxesChanged = { x, y -> viewModel.onLeftStickChanged(yaw = x, throttle = y) },
+            onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+            size = stickSize,
+            hudOverlay = true,
+            tag = "left_stick_pad",
+            modifier =
+              Modifier.graphicsLayer(
+                alpha = leftStickHud.opacity,
+                scaleX = leftStickHud.scale,
+                scaleY = leftStickHud.scale,
+              ),
+          )
+        }
+      }
+
+      if (showFixedSticks && rightStickHud.visible) {
+        HudPlacedSlot(config = rightStickHud, marginPx = marginPx) {
+          VirtualStickPad(
+            label = "ROLL / PITCH",
+            horizontalAxisLabel = "Roll",
+            verticalAxisLabel = "Pitch",
+            autoCenterY = true,
+            enabled = pilotingModeActive,
+            onAxesChanged = { x, y -> viewModel.onRightStickChanged(roll = x, pitch = y) },
+            onTouchActiveChanged = { viewModel.onManualStickTouchChanged(it) },
+            size = stickSize,
+            hudOverlay = true,
+            tag = "right_stick_pad",
+            modifier =
+              Modifier.graphicsLayer(
+                alpha = rightStickHud.opacity,
+                scaleX = rightStickHud.scale,
+                scaleY = rightStickHud.scale,
+              ),
+          )
+        }
+      }
+
+      if (interactionModeState.mode == CockpitInteractionMode.HUD_EDITING) {
+        HudEditorOverlay(
+          layoutConfig = activeHudLayout,
+          selectedElementId = selectedHudElement,
+          viewportSize = viewportSize,
+          canUndo = hudHistoryFlags.canUndo(isWideLayout),
+          canRedo = hudHistoryFlags.canRedo(isWideLayout),
+          onSelectElement = { viewModel.selectHudElement(it) },
+          onBeginDrag = { viewModel.beginHudDragUndo(isWideLayout) },
+          onMoveElement = { id, dx, dy -> viewModel.moveHudElement(isWideLayout, id, dx, dy) },
+          onScaleElement = { id, delta -> viewModel.scaleHudElement(isWideLayout, id, delta) },
+          onOpacityElement = { id, delta -> viewModel.opacityHudElement(isWideLayout, id, delta) },
+          onToggleVisibility = { viewModel.toggleHudElementVisibility(isWideLayout, it) },
+          onToggleLock = { viewModel.toggleHudElementLock(isWideLayout, it) },
+          onUndo = { viewModel.undoHudLayout(isWideLayout) },
+          onRedo = { viewModel.redoHudLayout(isWideLayout) },
+          onResetDefaults = { viewModel.resetHudLayout(isWideLayout) },
+          onDoneEditing = { viewModel.exitHudEditingMode() },
+          modifier = Modifier.fillMaxSize(),
+        )
       }
     }
   }
@@ -812,6 +978,30 @@ fun FlightCockpitScreen(
           )
         }
 
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f),
+          ) {
+            Icon(Icons.Default.CenterFocusWeak, contentDescription = null, tint = theme.colors.accent, modifier = Modifier.size(20.dp))
+            Column {
+              Text("Optical-Flow Hover Assist (Exp)", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("PD drift damping (±20% lat) with 600ms manual holdoff", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+          }
+          Switch(
+            checked = hoverAssistEnabled,
+            enabled = !caps.isVideoOnly,
+            onCheckedChange = { viewModel.toggleHoverAssist(it) },
+            modifier = Modifier.testTag("mode_hover_assist_switch"),
+          )
+        }
+
         @OptIn(ExperimentalLayoutApi::class)
         FlowRow(
           horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -847,6 +1037,16 @@ fun FlightCockpitScreen(
             },
             label = { Text("Lat Spin") },
             modifier = Modifier.testTag("mode_lat_spinner_chip"),
+          )
+          FilterChip(
+            selected = interactionModeState.mode == CockpitInteractionMode.HUD_EDITING,
+            onClick = {
+              viewModel.enterHudEditingMode()
+              showFlightModesSheet = false
+            },
+            leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            label = { Text("Edit HUD") },
+            modifier = Modifier.testTag("mode_hud_edit_button"),
           )
         }
 
@@ -1036,6 +1236,38 @@ fun FlightCockpitScreen(
         TextButton(onClick = { showEmergencyDialog = false }) { Text("Cancel") }
       },
     )
+  }
+}
+
+@Composable
+private fun HudPlacedSlot(
+  config: HudElementConfig,
+  marginPx: Int,
+  content: @Composable () -> Unit,
+) {
+  Layout(content = content) { measurables, constraints ->
+    val measurable = measurables.firstOrNull()
+    if (measurable == null) {
+      layout(constraints.maxWidth, constraints.maxHeight) {}
+    } else {
+      val childConstraints = constraints.copy(minWidth = 0, minHeight = 0)
+      val placeable = measurable.measure(childConstraints)
+      val xCenter = (config.normalizedX * constraints.maxWidth).roundToInt()
+      val yCenter = (config.normalizedY * constraints.maxHeight).roundToInt()
+      val x =
+        (xCenter - placeable.width / 2).coerceIn(
+          marginPx,
+          (constraints.maxWidth - placeable.width - marginPx).coerceAtLeast(marginPx),
+        )
+      val y =
+        (yCenter - placeable.height / 2).coerceIn(
+          marginPx,
+          (constraints.maxHeight - placeable.height - marginPx).coerceAtLeast(marginPx),
+        )
+      layout(constraints.maxWidth, constraints.maxHeight) {
+        placeable.placeRelative(x, y)
+      }
+    }
   }
 }
 
@@ -1238,12 +1470,15 @@ private fun HudCapabilityModifiersRow(
   speedTier: Int,
   fastFly: Boolean,
   headlessMode: Boolean,
+  fixedHeightMode: Boolean,
   isConnected: Boolean,
   activeCameraIndex: Int,
   trimActive: Boolean,
   modesActive: Boolean,
   onCycleSpeedTier: () -> Unit,
   onToggleHeadless: () -> Unit,
+  onToggleLight: () -> Unit,
+  onToggleFixedHeight: () -> Unit,
   onFlip360: (FlipDirection) -> Unit,
   onTiltCamera: (Int) -> Unit,
   onSwitchCamera: () -> Unit,
@@ -1283,6 +1518,27 @@ private fun HudCapabilityModifiersRow(
         onClick = onToggleHeadless,
         icon = Icons.Default.Explore,
         tag = "headless_mode_chip",
+      )
+    }
+
+    if (caps.supportsLightControl) {
+      HudOverlayMiniButton(
+        label = "Light",
+        enabled = isConnected,
+        onClick = onToggleLight,
+        icon = Icons.Default.Lightbulb,
+        tag = "light_toggle_button",
+      )
+    }
+
+    if (caps.supportsFixedHeightFlag) {
+      HudOverlayMiniButton(
+        label = "AltBit",
+        enabled = isConnected,
+        active = fixedHeightMode,
+        onClick = onToggleFixedHeight,
+        icon = Icons.Default.Height,
+        tag = "alt_hold_button",
       )
     }
 

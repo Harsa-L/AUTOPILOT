@@ -20,6 +20,12 @@ interface DroneProtocol {
 
   fun setControlArmed(armed: Boolean) {}
 
+  fun setServoProbe(enabled: Boolean, byteIndex: Int, hexValue: Int) {}
+
+  fun sendCooingdvPassword(digits8: String): Boolean = false
+
+  fun readDiagSummary(): String = ""
+
   fun telemetry(): Flow<DroneTelemetry>
 
   fun videoFrames(): Flow<VideoFramePacket>

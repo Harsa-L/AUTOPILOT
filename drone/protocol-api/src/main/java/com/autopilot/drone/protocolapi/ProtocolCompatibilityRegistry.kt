@@ -237,6 +237,9 @@ object ProtocolCompatibilityRegistry {
             supportsCameraSwitch = true,
             supportedVideoModes =
               listOf(VideoTransportType.RTSP_MJPEG, VideoTransportType.RTSP_H264),
+            supportsLightControl = true,
+            supportsCooingdvPassword = true,
+            supportsFixedHeightFlag = true,
           ),
       ),
       ProtocolRegistryEntry(
@@ -293,6 +296,9 @@ object ProtocolCompatibilityRegistry {
             supportsCameraSwitch = true,
             supportedVideoModes =
               listOf(VideoTransportType.RTSP_MJPEG, VideoTransportType.RTSP_H264),
+            supportsLightControl = true,
+            supportsCooingdvPassword = true,
+            supportsFixedHeightFlag = true,
           ),
       ),
       ProtocolRegistryEntry(
@@ -687,6 +693,7 @@ object ProtocolCompatibilityRegistry {
           supportsUnlockCommand = true,
           supportsFastFly = true,
           supportsVideoRecording = true,
+          supportsTrajectoryExecution = true,
           supportedVideoModes = listOf(VideoTransportType.SYNTHETIC_TEST_PATTERN),
         ),
     )

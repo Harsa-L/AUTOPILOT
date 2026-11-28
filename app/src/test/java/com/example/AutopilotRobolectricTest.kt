@@ -101,6 +101,40 @@ class AutopilotRobolectricTest {
     composeRule.onNodeWithTag("quick_aircraft_s2x").performClick()
     composeRule.waitForIdle()
     composeRule.onNodeWithTag("left_stick_pad").assertIsDisplayed()
+
+    // Enter and exit HUD Editing mode cleanly
+    composeRule.onNodeWithTag("flight_modes_chip").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("mode_hud_edit_button").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("hud_editor_overlay").assertIsDisplayed()
+    composeRule.onNodeWithTag("hud_edit_done_button").performClick()
+    composeRule.waitForIdle()
+
+    // Toggle Floating ATC profile in Flight Controls Settings, verify overlay on cockpit, then restore Fixed Pads
+    composeRule.onNodeWithTag("open_settings_button").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("settings_row_controls").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("stick_profile_atc_dual_touch").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("settings_sub_back").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("settings_back_button").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("atc_touch_overlay").assertIsDisplayed()
+
+    composeRule.onNodeWithTag("open_settings_button").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("settings_row_controls").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("stick_profile_fixed_sticks").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("settings_sub_back").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("settings_back_button").performClick()
+    composeRule.waitForIdle()
+    composeRule.onNodeWithTag("left_stick_pad").assertIsDisplayed()
   }
 
   @Test

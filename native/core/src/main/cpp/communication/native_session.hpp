@@ -42,6 +42,10 @@ struct SessionSnapshot {
   int32_t firmware_status_flags = -1;
   bool control_armed = false;
   std::string last_command_hex;
+  int32_t jieli_diag_1234_packets = 0;
+  std::string jieli_diag_sample_hex;
+  int32_t detected_cooingdv_id = -1;
+  bool cooingdv_gl_detected = false;
 };
 
 class NativeSession {
@@ -64,6 +68,8 @@ class NativeSession {
   void switch_camera(int32_t camera_index);
   void clear_actions();
   void request_keyframe();
+  void set_servo_probe(bool enabled, int32_t byte_index, int32_t hex_value);
+  bool send_cooingdv_password(const std::string& digits_8);
 
   SessionSnapshot snapshot();
   bool pop_video_frame(video::ReassembledFrame& out);
@@ -127,16 +133,25 @@ class NativeSession {
   uint32_t bl60x_last_frag_mask_ = 0;
   uint8_t bl60x_cam_index_ = 0;
 
-  // Jieli AC79 TCP CTP session state
+  // Jieli AC79 TCP & CooingDV Jieli UDP CTP session state
   std::vector<uint8_t> jieli_rx_buf_;
   bool jieli_date_sent_ = false;
   bool jieli_stream_requested_ = false;
+  bool jieli_udp_access_sent_ = false;
+  bool jieli_udp_date_sent_ = false;
+  bool jieli_udp_stream_requested_ = false;
+  int64_t jieli_udp_last_stream_req_ms_ = 0;
   int32_t jieli_video_w_ = 640;
   int32_t jieli_video_h_ = 480;
   int32_t jieli_video_fps_ = 25;
+  int64_t jieli_keepalive_interval_ms_ = 7500;
   int64_t jieli_last_stream_req_ms_ = 0;
   int64_t jieli_last_video_rx_ms_ = 0;
   int64_t jieli_last_keepalive_ms_ = 0;
+  int jieli_diag_1234_fd_ = -1;
+  int64_t jieli_diag_started_ms_ = 0;
+  bool jieli_diag_finished_ = false;
+  std::atomic<int32_t> jieli_diag_pkt_count_{0};
 
   // Lewei TCP state
   int64_t lewei_last_video_rx_ms_ = 0;
@@ -164,6 +179,14 @@ class NativeSession {
 
   // CooingDV / general timing
   int64_t last_heartbeat_ms_ = 0;
+  int32_t last_cooingdv_photo_ctr_ = -1;
+  int32_t last_cooingdv_video_ctr_ = -1;
+  std::atomic<int32_t> detected_cooingdv_id_{-1};
+
+  // Ground-only servo probe state
+  bool servo_probe_enabled_ = false;
+  uint8_t servo_probe_byte_index_ = 9;
+  uint8_t servo_probe_hex_value_ = 0;
 
   std::mutex state_mutex_;
   protocol::StickState stick_state_;
@@ -190,6 +213,7 @@ class NativeSession {
 
   std::mutex hex_mutex_;
   std::string last_command_hex_;
+  std::string jieli_diag_sample_hex_;
 };
 
 }  // namespace autopilot::comm

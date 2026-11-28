@@ -55,6 +55,8 @@ fun VisionScreen(
   val context = LocalContext.current
   val visionEnabled by viewModel.visionOverlayEnabled.collectAsStateWithLifecycle()
   val targetSelectionEnabled by viewModel.targetSelectionEnabled.collectAsStateWithLifecycle()
+  val hoverAssistEnabled by viewModel.hoverAssistEnabled.collectAsStateWithLifecycle()
+  val visionResult by viewModel.visionResult.collectAsStateWithLifecycle()
   val availability by viewModel.detectorAvailability.collectAsStateWithLifecycle()
   val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
   val selectedEntry by viewModel.selectedEntry.collectAsStateWithLifecycle()
@@ -190,6 +192,38 @@ fun VisionScreen(
               checked = targetSelectionEnabled,
               onCheckedChange = { viewModel.toggleTargetSelection(it) },
               modifier = Modifier.testTag("vision_target_select_switch"),
+            )
+          }
+
+          Spacer(Modifier.height(10.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text(
+                text = "Optical-Flow Hover Assist (Exp)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = theme.colors.textPrimary,
+              )
+              val flowCount = visionResult?.validFlowCount ?: 0
+              Text(
+                text =
+                  if (hoverAssistEnabled) {
+                    "Active while flying (±20% lat / ±15% yaw · 600ms manual holdoff · $flowCount vec)"
+                  } else {
+                    "Visual PD drift damping using Lucas-Kanade optical flow (yields immediately to pilot)"
+                  },
+                style = MaterialTheme.typography.bodySmall,
+                color = theme.colors.textSecondary,
+              )
+            }
+            Switch(
+              checked = hoverAssistEnabled,
+              enabled = !caps.isVideoOnly,
+              onCheckedChange = { viewModel.toggleHoverAssist(it) },
+              modifier = Modifier.testTag("vision_hover_assist_switch"),
             )
           }
 

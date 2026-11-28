@@ -124,10 +124,18 @@ class MainActivity : ComponentActivity() {
     return super.onKeyUp(keyCode, event)
   }
 
+  override fun onWindowFocusChanged(hasFocus: Boolean) {
+    super.onWindowFocusChanged(hasFocus)
+    if (!hasFocus) {
+      viewModel.onCockpitInterrupted("Window lost focus")
+    }
+  }
+
   override fun onPause() {
     if (::keyboardHandler.isInitialized) {
       keyboardHandler.clearHeldKeys()
     }
+    viewModel.onCockpitInterrupted("Activity paused")
     super.onPause()
   }
 

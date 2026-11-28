@@ -182,6 +182,45 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeLastCommandHex(JNIEnv*
   return env->NewStringUTF(snap.last_command_hex.c_str());
 }
 
+JNIEXPORT void JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeSetServoProbe(JNIEnv* /* env */,
+                                                                        jobject /* thiz */,
+                                                                        jlong handle,
+                                                                        jboolean enabled,
+                                                                        jint byte_index,
+                                                                        jint hex_value) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (session) {
+    session->set_servo_probe(enabled == JNI_TRUE, byte_index, hex_value);
+  }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeSendCooingdvPassword(JNIEnv* env,
+                                                                               jobject /* thiz */,
+                                                                               jlong handle,
+                                                                               jstring digits_8) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (!session) return JNI_FALSE;
+  return session->send_cooingdv_password(jstring_to_std(env, digits_8)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeReadDiagSummary(JNIEnv* env,
+                                                                          jobject /* thiz */,
+                                                                          jlong handle) {
+  auto* session = reinterpret_cast<autopilot::comm::NativeSession*>(handle);
+  if (!session) return env->NewStringUTF("");
+  const auto snap = session->snapshot();
+  char buf[384];
+  std::snprintf(
+      buf, sizeof(buf),
+      "cooingdv_id=%d;gl=%d;jieli_1234_pkts=%d;jieli_1234_hex=%s",
+      snap.detected_cooingdv_id, snap.cooingdv_gl_detected ? 1 : 0,
+      snap.jieli_diag_1234_packets, snap.jieli_diag_sample_hex.c_str());
+  return env->NewStringUTF(buf);
+}
+
 /**
  * Copies the latest reassembled frame into a reusable direct ByteBuffer.
  * Writes metadata into [outMeta] = [sequence, timestampUs, transportKind, width, height, byteLen, isSynthetic, isKeyframe].
@@ -298,7 +337,7 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeProcessVisionFrame(
 
   const size_t flow_count = flow.grid_vectors.size();
   const size_t track_count = tracks.size();
-  const size_t total_floats = 4 + flow_count * 5 + track_count * 11;
+  const size_t total_floats = 4 + flow_count * 5 + track_count * 11 + 2;
   std::vector<jfloat> packed(total_floats);
   packed[0] = flow.global_dx_norm;
   packed[1] = flow.global_dy_norm;
@@ -326,6 +365,8 @@ Java_com_autopilot_nativecore_AutopilotNativeBridge_nativeProcessVisionFrame(
     packed[idx++] = t.estimated_distance_m;
     packed[idx++] = t.distance_uncertainty_m;
   }
+  packed[idx++] = flow.rotational_yaw_omega;
+  packed[idx++] = static_cast<jfloat>(flow.valid_vector_count);
 
   jfloatArray result = env->NewFloatArray(static_cast<jsize>(total_floats));
   env->SetFloatArrayRegion(result, 0, static_cast<jsize>(total_floats), packed.data());

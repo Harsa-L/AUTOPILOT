@@ -58,6 +58,9 @@ OpticalFlowSummary NativeVisionEngine::compute_optical_flow(const uint8_t* rgb24
     return summary;
   }
 
+  std::vector<float> valid_dx;
+  std::vector<float> valid_dy;
+  std::vector<const FlowVector*> valid_ptrs;
   const int32_t half_win = 4;
   float sum_dx = 0.0f;
   float sum_dy = 0.0f;
@@ -116,14 +119,46 @@ OpticalFlowSummary NativeVisionEngine::compute_optical_flow(const uint8_t* rgb24
       if (conf > 0.1f) {
         sum_dx += dx_norm;
         sum_dy += dy_norm;
+        valid_dx.push_back(dx_norm);
+        valid_dy.push_back(dy_norm);
         ++valid_count;
       }
     }
   }
 
+  summary.valid_vector_count = valid_count;
   if (valid_count > 0) {
-    summary.global_dx_norm = sum_dx / static_cast<float>(valid_count);
-    summary.global_dy_norm = sum_dy / static_cast<float>(valid_count);
+    auto median_of = [](std::vector<float> vals) -> float {
+      const size_t n = vals.size();
+      const size_t mid = n / 2;
+      std::nth_element(vals.begin(), vals.begin() + static_cast<ptrdiff_t>(mid), vals.end());
+      float m = vals[mid];
+      if ((n % 2) == 0 && mid > 0) {
+        const auto max_low = *std::max_element(vals.begin(), vals.begin() + static_cast<ptrdiff_t>(mid));
+        m = 0.5f * (m + max_low);
+      }
+      return m;
+    };
+    summary.median_dx_norm = median_of(valid_dx);
+    summary.median_dy_norm = median_of(valid_dy);
+    summary.global_dx_norm = (valid_count >= 3) ? summary.median_dx_norm : (sum_dx / static_cast<float>(valid_count));
+    summary.global_dy_norm = (valid_count >= 3) ? summary.median_dy_norm : (sum_dy / static_cast<float>(valid_count));
+
+    std::vector<float> omegas;
+    for (const auto& fv : summary.grid_vectors) {
+      if (fv.confidence <= 0.1f) continue;
+      const float rx = fv.norm_x - 0.5f;
+      const float ry = fv.norm_y - 0.5f;
+      const float r2 = rx * rx + ry * ry;
+      if (r2 > 0.01f) {
+        const float res_dx = fv.dx_norm - summary.median_dx_norm;
+        const float res_dy = fv.dy_norm - summary.median_dy_norm;
+        omegas.push_back((rx * res_dy - ry * res_dx) / r2);
+      }
+    }
+    if (omegas.size() >= 3) {
+      summary.rotational_yaw_omega = std::clamp(median_of(omegas), -1.0f, 1.0f);
+    }
   }
 
   prev_luma_ = std::move(curr_luma);

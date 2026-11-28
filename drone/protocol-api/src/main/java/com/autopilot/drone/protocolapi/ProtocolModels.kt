@@ -76,7 +76,11 @@ data class DroneCapabilities(
   val supportsFirmwareSdCapture: Boolean = false,
   val supportsCameraSwitch: Boolean = false,
   val isVideoOnly: Boolean = false,
+  val supportsTrajectoryExecution: Boolean = false,
   val supportedVideoModes: List<VideoTransportType> = emptyList(),
+  val supportsLightControl: Boolean = false,
+  val supportsCooingdvPassword: Boolean = false,
+  val supportsFixedHeightFlag: Boolean = false,
 ) {
   val supportsAnyFlightControl: Boolean
     get() =
@@ -197,6 +201,10 @@ sealed interface FlightCommand {
   data class SwitchCamera(val cameraIndex: Int) : FlightCommand
 
   data object RequestKeyframe : FlightCommand
+
+  data object ToggleLight : FlightCommand
+
+  data class SetFixedHeightMode(val enabled: Boolean) : FlightCommand
 }
 
 /**

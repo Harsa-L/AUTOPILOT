@@ -2,6 +2,7 @@ package com.autopilot.flight.control
 
 import com.autopilot.core.common.AutopilotLog
 import com.autopilot.core.common.SubsystemTag
+import com.autopilot.core.common.VerificationStatus
 import com.autopilot.drone.protocolapi.ConnectionConfig
 import com.autopilot.drone.protocolapi.ConnectionState
 import com.autopilot.drone.protocolapi.DroneCapabilities
@@ -9,6 +10,7 @@ import com.autopilot.drone.protocolapi.DroneProtocol
 import com.autopilot.drone.protocolapi.DroneTelemetry
 import com.autopilot.drone.protocolapi.FlightCommand
 import com.autopilot.drone.protocolapi.ProtocolDescriptor
+import com.autopilot.drone.protocolapi.ProtocolFamily
 import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sign
@@ -92,14 +94,26 @@ object InputNormalizer {
     rawThrottle: Float,
     rawYaw: Float,
     config: ControlSensitivityConfig,
+    preShapedRollPitch: Boolean = false,
+    preShapedThrottleYaw: Boolean = false,
   ): FlightCommand.StickAxes {
+    val normRoll =
+      if (preShapedRollPitch) rawRoll.coerceIn(-1f, 1f)
+      else normalizeAxis(rawRoll, config.deadzone, config.expo)
+    val normPitch =
+      if (preShapedRollPitch) rawPitch.coerceIn(-1f, 1f)
+      else normalizeAxis(rawPitch, config.deadzone, config.expo)
+    val normThrottle =
+      if (preShapedThrottleYaw) rawThrottle.coerceIn(-1f, 1f)
+      else normalizeAxis(rawThrottle, config.deadzone, config.expo)
+    val normYaw =
+      if (preShapedThrottleYaw) rawYaw.coerceIn(-1f, 1f)
+      else normalizeAxis(rawYaw, config.deadzone, config.expo)
     return FlightCommand.StickAxes(
-      roll = normalizeAxis(rawRoll, config.deadzone, config.expo),
-      pitch = normalizeAxis(rawPitch, config.deadzone, config.expo),
-      throttle =
-        (normalizeAxis(rawThrottle, config.deadzone, config.expo) * config.maxThrottleCap)
-          .coerceIn(-1f, 1f),
-      yaw = normalizeAxis(rawYaw, config.deadzone, config.expo),
+      roll = normRoll,
+      pitch = normPitch,
+      throttle = (normThrottle * config.maxThrottleCap).coerceIn(-1f, 1f),
+      yaw = normYaw,
       trimRoll = config.trimRoll.coerceIn(-0.25f, 0.25f),
       trimPitch = config.trimPitch.coerceIn(-0.25f, 0.25f),
     )
@@ -137,11 +151,21 @@ class FlightStateController(private val scope: CoroutineScope) {
   private val _cameraTiltStep = MutableStateFlow(0)
   val cameraTiltStep: StateFlow<Int> = _cameraTiltStep.asStateFlow()
 
+  private val _fixedHeightMode = MutableStateFlow(false)
+  val fixedHeightMode: StateFlow<Boolean> = _fixedHeightMode.asStateFlow()
+
+  private val _linkRxVerified = MutableStateFlow(false)
+  val linkRxVerified: StateFlow<Boolean> = _linkRxVerified.asStateFlow()
+
+  @Volatile var allowExperimentalFlightCommands: Boolean = true
+
   private var activeProtocol: DroneProtocol? = null
   private var stateJob: Job? = null
   private var telemetryJob: Job? = null
   private var watchdogJob: Job? = null
   private var lastRxSeenAtMs: Long = 0L
+  private var connectedAtMs: Long = 0L
+  private var rxSilenceWarned: Boolean = false
 
   val currentDescriptor: ProtocolDescriptor?
     get() = activeProtocol?.descriptor
@@ -173,7 +197,11 @@ class FlightStateController(private val scope: CoroutineScope) {
             ConnectionState.Discovering -> _flightState.value = FlightState.Discovering
             is ConnectionState.Connecting -> _flightState.value = FlightState.Connecting
             is ConnectionState.Connected -> {
-              lastRxSeenAtMs = System.currentTimeMillis()
+              val now = System.currentTimeMillis()
+              lastRxSeenAtMs = now
+              connectedAtMs = now
+              rxSilenceWarned = false
+              _linkRxVerified.value = protocol.descriptor.isSyntheticHarness
               _flightState.value = FlightState.Ready
             }
             is ConnectionState.Reconnecting -> {
@@ -198,6 +226,7 @@ class FlightStateController(private val scope: CoroutineScope) {
           _telemetry.value = t
           if (t.packetsReceived > 0L) {
             lastRxSeenAtMs = t.timestampMs
+            _linkRxVerified.value = true
           }
         }
         .launchIn(scope)
@@ -212,6 +241,7 @@ class FlightStateController(private val scope: CoroutineScope) {
     telemetryJob?.cancel()
     activeProtocol?.let { proto ->
       runCatching {
+        proto.setServoProbe(false, 9, 0)
         proto.setControlArmed(false)
         proto.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
         proto.disconnect()
@@ -221,14 +251,30 @@ class FlightStateController(private val scope: CoroutineScope) {
     _telemetry.value = null
     _headlessMode.value = false
     _fastFly.value = false
+    _fixedHeightMode.value = false
+    _linkRxVerified.value = false
     _cameraTiltStep.value = 0
     _flightState.value = FlightState.Disconnected
+  }
+
+  private fun isBlockedByExperimentalGate(proto: DroneProtocol): Boolean {
+    if (proto.descriptor.verificationStatus == VerificationStatus.EXPERIMENTAL &&
+      !allowExperimentalFlightCommands
+    ) {
+      _safetyNotice.value =
+        "${proto.descriptor.displayName} is experimental — enable 'Allow Experimental Flight Commands' in Settings > Aircraft & Link to arm or fly."
+      return true
+    }
+    return false
   }
 
   fun arm(): Boolean {
     val proto = activeProtocol
     if (proto != null && proto.capabilities.isVideoOnly) {
       _safetyNotice.value = "${proto.descriptor.displayName} is video-only; flight commands disabled."
+      return false
+    }
+    if (proto != null && isBlockedByExperimentalGate(proto)) {
       return false
     }
     val state = _flightState.value
@@ -254,6 +300,9 @@ class FlightStateController(private val scope: CoroutineScope) {
       _safetyNotice.value = "${proto.descriptor.displayName} is video-only; flight commands disabled."
       return false
     }
+    if (isBlockedByExperimentalGate(proto)) {
+      return false
+    }
     if (!proto.capabilities.supportsUnlockCommand) {
       _safetyNotice.value = "${proto.descriptor.displayName} does not support motor unlock command."
       return false
@@ -269,6 +318,7 @@ class FlightStateController(private val scope: CoroutineScope) {
   }
 
   fun disarm() {
+    activeProtocol?.setServoProbe(false, 9, 0)
     activeProtocol?.setControlArmed(false)
     val state = _flightState.value
     if (state == FlightState.Armed || state == FlightState.Emergency) {
@@ -277,7 +327,14 @@ class FlightStateController(private val scope: CoroutineScope) {
     }
   }
 
-  suspend fun sendStickInput(roll: Float, pitch: Float, throttle: Float, yaw: Float) {
+  suspend fun sendStickInput(
+    roll: Float,
+    pitch: Float,
+    throttle: Float,
+    yaw: Float,
+    preShapedRollPitch: Boolean = false,
+    preShapedThrottleYaw: Boolean = false,
+  ) {
     val proto = activeProtocol ?: return
     if (proto.capabilities.isVideoOnly) return
     val state = _flightState.value
@@ -288,7 +345,16 @@ class FlightStateController(private val scope: CoroutineScope) {
     ) {
       return
     }
-    val normalized = InputNormalizer.normalizeSticks(roll, pitch, throttle, yaw, _sensitivity.value)
+    val normalized =
+      InputNormalizer.normalizeSticks(
+        rawRoll = roll,
+        rawPitch = pitch,
+        rawThrottle = throttle,
+        rawYaw = yaw,
+        config = _sensitivity.value,
+        preShapedRollPitch = preShapedRollPitch,
+        preShapedThrottleYaw = preShapedThrottleYaw,
+      )
     proto.sendCommand(normalized)
   }
 
@@ -303,6 +369,7 @@ class FlightStateController(private val scope: CoroutineScope) {
         }
       return false
     }
+    if (isBlockedByExperimentalGate(proto)) return false
     if (_flightState.value != FlightState.Armed) {
       _safetyNotice.value = "Arm aircraft before commanding takeoff."
       return false
@@ -323,6 +390,7 @@ class FlightStateController(private val scope: CoroutineScope) {
       _safetyNotice.value = "${proto.descriptor.displayName} does not support 360° flip stunts."
       return false
     }
+    if (isBlockedByExperimentalGate(proto)) return false
     val state = _flightState.value
     if (state != FlightState.Armed && state != FlightState.Flying) {
       _safetyNotice.value = "Arm or fly aircraft before commanding 360° flip."
@@ -353,6 +421,7 @@ class FlightStateController(private val scope: CoroutineScope) {
         }
       return false
     }
+    if (isBlockedByExperimentalGate(proto)) return false
     _flightState.value = FlightState.Landing
     proto.sendCommand(FlightCommand.ControlledLand)
     AutopilotLog.info(SubsystemTag.FLIGHT_SAFETY, "Commanded CONTROLLED_LAND on ${proto.descriptor.id}")
@@ -486,6 +555,46 @@ class FlightStateController(private val scope: CoroutineScope) {
     proto.sendCommand(FlightCommand.CameraTilt(clamped))
   }
 
+  suspend fun toggleLight() {
+    val proto = activeProtocol ?: return
+    if (!proto.capabilities.supportsLightControl) return
+    proto.sendCommand(FlightCommand.ToggleLight)
+    _safetyNotice.value = "Navigation light toggle pulse transmitted."
+  }
+
+  suspend fun setFixedHeightMode(enabled: Boolean) {
+    val proto = activeProtocol ?: return
+    if (!proto.capabilities.supportsFixedHeightFlag) return
+    _fixedHeightMode.value = enabled
+    proto.sendCommand(FlightCommand.SetFixedHeightMode(enabled))
+  }
+
+  fun setServoProbe(enabled: Boolean, byteIndex: Int, hexValue: Int) {
+    val proto = activeProtocol ?: return
+    proto.setControlArmed(enabled)
+    proto.setServoProbe(enabled, byteIndex, hexValue)
+  }
+
+  fun sendCooingdvPassword(digits8: String): Boolean {
+    val proto = activeProtocol ?: return false
+    return proto.sendCooingdvPassword(digits8)
+  }
+
+  fun readDiagSummary(): String = activeProtocol?.readDiagSummary().orEmpty()
+
+  private fun expectsInboundPackets(descriptor: ProtocolDescriptor): Boolean =
+    !descriptor.isSyntheticHarness &&
+      when (descriptor.family) {
+        ProtocolFamily.JIELI_AC79,
+        ProtocolFamily.LEWEI,
+        ProtocolFamily.COOINGDV,
+        ProtocolFamily.COOINGDV_GL,
+        ProtocolFamily.COOINGDV_JIELI,
+        ProtocolFamily.FLOW_BL60X,
+        ProtocolFamily.X69_LG -> true
+        else -> false
+      }
+
   private fun startWatchdog(protocol: DroneProtocol) {
     watchdogJob?.cancel()
     watchdogJob =
@@ -493,8 +602,21 @@ class FlightStateController(private val scope: CoroutineScope) {
         while (true) {
           delay(500L)
           val state = _flightState.value
+          val t = _telemetry.value
+          val now = System.currentTimeMillis()
+          if (state == FlightState.Ready &&
+            !rxSilenceWarned &&
+            expectsInboundPackets(protocol.descriptor) &&
+            connectedAtMs > 0L &&
+            (now - connectedAtMs) >= 5000L &&
+            (t?.packetsReceived ?: 0L) == 0L
+          ) {
+            rxSilenceWarned = true
+            _safetyNotice.value =
+              "Link active with 0 RX datagrams — verify aircraft power, Wi-Fi subnet, and port."
+          }
+
           if (state == FlightState.Flying || state == FlightState.Armed || state == FlightState.TakingOff) {
-            val t = _telemetry.value
             val errno = t?.lastSocketErrno ?: 0
             if (!protocol.descriptor.isSyntheticHarness &&
               (errno == 1 || errno == 101 || errno == 113)
@@ -506,7 +628,7 @@ class FlightStateController(private val scope: CoroutineScope) {
               protocol.sendCommand(FlightCommand.StickAxes(0f, 0f, 0f, 0f))
               continue
             }
-            val age = System.currentTimeMillis() - lastRxSeenAtMs
+            val age = now - lastRxSeenAtMs
             // For real hardware sessions with inbound packets previously seen, warn after 4s silence.
             if (!protocol.descriptor.isSyntheticHarness &&
               (t?.packetsReceived ?: 0L) > 0L &&

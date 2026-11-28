@@ -16,6 +16,8 @@ object NativeActionFlags {
   const val FAST_FLY = 1 shl 8
   const val SD_CAPTURE_PULSE = 1 shl 9
   const val SD_RECORD_LATCH = 1 shl 10
+  const val LIGHT_TOGGLE = 1 shl 11
+  const val ALT_HOLD = 1 shl 12
 }
 
 data class NativeSessionCounters(
@@ -174,6 +176,12 @@ object AutopilotNativeBridge {
   external fun nativeReadSessionCounters(handle: Long): LongArray
 
   external fun nativeLastCommandHex(handle: Long): String
+
+  external fun nativeSetServoProbe(handle: Long, enabled: Boolean, byteIndex: Int, hexValue: Int)
+
+  external fun nativeSendCooingdvPassword(handle: Long, digits8: String): Boolean
+
+  external fun nativeReadDiagSummary(handle: Long): String
 
   external fun nativePopVideoFrame(
     handle: Long,

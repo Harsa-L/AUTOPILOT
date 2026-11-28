@@ -53,6 +53,8 @@ data class VisionFrameResult(
   val flowVectors: List<OpticalFlowVector>,
   val trackedTargets: List<TrackedTarget>,
   val isSyntheticInput: Boolean,
+  val rotationalYawOmega: Float = 0f,
+  val validFlowCount: Int = 0,
 )
 
 /**

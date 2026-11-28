@@ -1,0 +1,507 @@
+AUTOPILOT — Spécification des commandes de vol avancées
+
+**Périmètre :** Gravity Mode, Adaptive Floating Touch Controls (ATC), Virtual Trajectory Drawing, Gesture Arbitration et HUD Editing.
+
+**Statut :** spécification fonctionnelle et technique de référence. Les comportements de vol propres à chaque drone doivent être validés sur le protocole et le matériel correspondants avant activation en vol réel.
+
+## 1. Vision et principes généraux
+
+AUTOPILOT doit offrir plusieurs sources de commande dans un cockpit unique : joysticks virtuels fixes ou flottants, inclinaison du téléphone avec Gravity Mode, tracé tactile de trajectoire et outils contextuels. Ces fonctionnalités ne doivent pas envoyer directement leurs commandes aux protocoles. Elles produisent des intentions normalisées, ensuite arbitrées, limitées et transmises par une chaîne commune.
+
+Principes fondamentaux :
+
+1. Une interaction tactile ne possède qu'un seul propriétaire à la fois.
+2. La connexion au drone est indépendante de l'état actif/passif d'une source de pilotage.
+3. Les sources ne doivent pas commander simultanément le même axe, sauf fusion explicitement définie et validée.
+4. Toute transition de mode doit neutraliser les commandes concernées et éviter les sauts de commande.
+5. Un neutre logiciel ne signifie pas nécessairement stationnaire, maintien d'altitude ou atterrissage.
+6. Les capacités doivent être déclarées par profil de drone et étayées par des validations réelles.
+7. Le cockpit doit rester minimal et ergonomique. Les éléments HUD persistants non essentiels ne devraient normalement pas occuper plus de 30 % du viewport caméra, afin de préserver au moins 70 % de surface vidéo dégagée.
+
+## 2. Architecture commune des entrées
+
+```text
+Sensors / Touch / UI
+       |
+       v
+Input Sources
+(Gravity, ATC, fixed sticks, trajectory tool)
+       |
+       v
+TouchInteractionRouter + GestureArbitrator
+       |
+       v
+FlightInputMixer + AxisOwnershipManager
+       |
+       v
+FlightControlPipeline
+(normalization, deadzone, curves, limits, freshness)
+       |
+       v
+DeviceSafetyPolicy
+       |
+       v
+Drone-specific Protocol Adapter
+       |
+       v
+Drone
+```
+
+La trajectoire possède en plus un pipeline de dessin, traitement géométrique, prévisualisation et validation. Elle ne doit pas être assimilée à un joystick ni convertie en commandes improvisées.
+
+### Propriété des axes
+
+Les axes génériques sont Pitch, Roll, Yaw et Throttle. Par défaut :
+
+- Gravity : Pitch + Roll ;
+- ATC gauche : Throttle + Yaw ;
+- ATC droite : Pitch + Roll.
+
+Ce sont des configurations initiales, modifiables selon le drone et les préférences. Le `FlightInputMixer` doit attribuer un propriétaire explicite à chaque axe. Une source suspendue, invalide ou périmée ne doit pas continuer à fournir sa dernière valeur.
+
+## 3. Gravity Mode — pilotage par inclinaison
+
+### Objectif et comportement
+
+Gravity Mode utilise l'inclinaison physique du téléphone pour piloter les déplacements horizontaux. L'inclinaison avant/arrière commande normalement Pitch ; l'inclinaison gauche/droite commande normalement Roll. Throttle et Yaw restent indépendants par défaut et sont contrôlés par des commandes dédiées.
+
+Gravity est une source d'entrée universelle, non une fonctionnalité propre à un modèle de drone.
+
+### Référentiel d'orientation
+
+Le mapping doit suivre l'orientation effective du cockpit : portrait, paysage et, si pris en charge, paysage inversé. Les axes bruts du capteur ne doivent pas être reliés directement aux axes de vol. Les mesures doivent être transformées dans un repère cockpit cohérent avec l'orientation de l'interface.
+
+Lors d'une rotation de l'écran, le système doit neutraliser ou suspendre Gravity, recalculer le mapping, conserver une référence stable et reprendre progressivement. Aucun changement d'orientation ne doit inverser brutalement les commandes.
+
+### Capteurs
+
+Ordre de préférence indicatif :
+
+1. `TYPE_GAME_ROTATION_VECTOR` ;
+2. `TYPE_ROTATION_VECTOR` ;
+3. `TYPE_GRAVITY` ;
+4. accéléromètre avec estimation et filtrage appropriés.
+
+L'accéléromètre brut ne doit jamais devenir directement une commande de vol. Le système surveille disponibilité, horodatage, valeurs non finies, sauts anormaux et fraîcheur des mesures.
+
+### Calibration
+
+La calibration définit la position neutre du téléphone. Fonctions requises :
+
+- calibration initiale guidée ;
+- recentrage manuel ;
+- indicateur de référence neutre ;
+- vérification de stabilité avant calibration ;
+- refus ou report du recentrage si une commande importante est active ;
+- mémorisation éventuelle par orientation ;
+- réinitialisation de calibration.
+
+Le recentrage ne doit pas être déclenché accidentellement pendant un pilotage actif.
+
+### Traitement du signal
+
+Pipeline requis : transformation dans le repère cockpit, soustraction de la référence calibrée, filtrage, deadzone, normalisation, courbe de réponse, limitation de variation, contrôle de fraîcheur et émission d'une commande normalisée.
+
+### Contrôles avancés
+
+- **Sensibilité :** globale ou indépendante Pitch/Roll, réglage fin.
+- **Deadzone :** zone neutre centrale, éventuellement différente par axe.
+- **Courbe :** linéaire, exponentielle/progressive ou personnalisée.
+- **Angle maximal :** angle associé à la commande maximale, distinct par axe.
+- **Lissage :** intensité du filtrage et réponse plus ou moins directe.
+- **Slew/rate limit :** limite de variation de commande.
+- **Référence :** liée au cockpit, avec politique de verrouillage pendant une séquence.
+- **Préréglages :** Precision, Normal et Sport. Ce sont des profils de réponse d'entrée, pas des modifications implicites des limites de sécurité du drone.
+
+### Retour visuel et sécurité
+
+Un indicateur compact peut montrer l'inclinaison, le neutre, la direction et le niveau de commande, ainsi que l'état de calibration et du capteur. Une perte ou un retard excessif des mesures invalide la source. La dernière commande ne doit pas être conservée indéfiniment. La reprise doit être progressive. L'activation de Gravity n'arme pas automatiquement le drone.
+
+## 4. Adaptive Floating Touch Controls (ATC)
+
+### Objectif
+
+ATC crée deux zones tactiles virtuelles indépendantes, généralement gauche et droite. Elles peuvent être invisibles ou discrètes au repos. Lorsqu'un doigt touche une zone, un joystick flottant apparaît exactement sous le doigt. Une ou deux zones peuvent être utilisées simultanément.
+
+### Sémantique du toucher : ancre neutre
+
+Le premier contact ne commande rien :
+
+1. `DOWN` mémorise la position initiale du doigt ;
+2. le joystick apparaît à cette position ;
+3. cette position devient l'ancre neutre ;
+4. seul le déplacement relatif ultérieur (`MOVE`) produit une commande ;
+5. `UP` ou `CANCEL` neutralise les axes assignés, libère le pointeur et masque le joystick.
+
+Poser le doigt ne doit jamais, à lui seul, provoquer une commande.
+
+### Relâchement et état passif
+
+Quand le doigt est levé, le joystick disparaît et ses axes sont remis dans l'état défini par la politique du profil. L'autre joystick continue de fonctionner s'il dispose toujours d'un pointeur valide. La connexion et la session réseau restent actives.
+
+**Passif ne signifie pas déconnecté, stationnaire ou maintien d'altitude garanti.** Sur certains drones, un throttle neutre peut provoquer une descente. Le comportement de relâchement doit être validé pour chaque profil.
+
+### Multitouch
+
+Utiliser les identifiants Android `pointerId`, pas seulement l'index du pointeur. Chaque zone possède au plus un pointeur actif, sauf politique multi-contact explicitement définie. Les deux zones peuvent fonctionner simultanément avec deux pointeurs distincts.
+
+- Un pointeur capturé conserve son propriétaire jusqu'à `UP` ou `CANCEL`.
+- Traverser visuellement la frontière d'une zone ne transfère pas la propriété.
+- Un contact supplémentaire dans une zone occupée est ignoré ou géré par une règle explicite.
+- `ACTION_POINTER_UP`, `ACTION_UP` et `ACTION_CANCEL` doivent libérer proprement le pointeur et neutraliser les axes concernés.
+
+### Configuration par zone
+
+Chaque zone est indépendante et peut régler :
+
+- activation ;
+- position, largeur, hauteur et forme ;
+- surface de capture ;
+- mode Fixed, Floating ou Hybrid ;
+- taille visuelle et course maximale ;
+- axes assignés et inversion ;
+- sensibilité, deadzone et courbe ;
+- opacité et visibilité ;
+- orientation portrait/paysage ;
+- politique de pointeur et de relâchement.
+
+Les zones ne sont pas obligatoirement deux moitiés fixes de l'écran. Elles peuvent être repositionnées et redimensionnées. Si elles se chevauchent, une priorité explicite est nécessaire.
+
+### Contrôles avancés
+
+- **Floating :** le centre apparaît sous le doigt.
+- **Fixed :** le centre reste à une position définie.
+- **Hybrid :** zone de capture étendue avec ancre flottante ou centre contraint.
+- Sensibilité par axe, course maximale, deadzone, courbe et inversion.
+- Taille, opacité, retour visuel et position des zones.
+- Affectation libre des axes, désactivation d'un axe et remappage gauche/droite.
+- Politique de relâchement propre au drone.
+- Profils Dual Touch, Hybrid Gravity (Gravity Pitch/Roll + ATC Throttle/Yaw) et Manual, sans chevauchement ambigu de propriété des axes.
+
+## 5. Virtual Trajectory Drawing — tracé de trajectoire
+
+### Objectif
+
+L'utilisateur dessine une trajectoire directement sur l'écran afin de définir un parcours que le drone pourrait exécuter si son matériel et son protocole prennent réellement cette capacité en charge.
+
+### Priorité sur ATC
+
+Lorsque le mode Tracé est activé :
+
+- ATC est temporairement suspendu ;
+- aucun nouveau contact ne peut activer un joystick ;
+- le tracé peut commencer dans la zone gauche ou droite ;
+- le tracé peut traverser les deux zones ;
+- aucun même geste n'est distribué simultanément à ATC et au moteur de trajectoire.
+
+Le mode Tracé réserve la surface de travail autorisée. Les zones ATC restent configurées et activées dans les paramètres, mais leur interprétation tactile est suspendue pendant cette opération.
+
+### Cycle utilisateur
+
+1. Sélection explicite de l'outil Trajectoire.
+2. Suspension sûre des sources tactiles de pilotage.
+3. Contact et dessin sur la surface autorisée.
+4. Prévisualisation de la trajectoire.
+5. Possibilité de corriger, effacer ou annuler.
+6. Validation explicite par une action distincte.
+7. Vérification des capacités du profil et des conditions d'exécution.
+8. Exécution uniquement après confirmation distincte.
+
+La fin du dessin ou le relâchement du doigt ne doit jamais lancer automatiquement la trajectoire.
+
+### Propriété des pointeurs
+
+Le `DOWN` accepté par l'outil attribue le pointeur au tracé jusqu'à `UP` ou `CANCEL`. Un doigt déjà détenu par un joystick au moment de l'activation du mode Tracé ne devient pas un tracé. Il faut attendre un nouveau `DOWN`.
+
+À la sortie du mode Tracé, un doigt encore posé ne peut pas activer ATC. Il faut attendre le relâchement puis un nouveau contact.
+
+### Traitement et limites
+
+Séparer les points bruts, la géométrie nettoyée, l'affichage, les données interprétées et les commandes d'exécution. Les traitements peuvent inclure suppression des points redondants, lissage, simplification contrôlée, détection de segments trop courts, points de passage et direction.
+
+Ne pas inventer de distance, altitude, vitesse ou position géographique à partir d'un dessin caméra sans calibration, modèle géométrique ou télémétrie suffisante.
+
+Tous les drones ne prennent pas en charge les waypoints ou la navigation autonome. Si un protocole ne permet pas réellement l'exécution de trajectoire, l'interface doit le signaler et ne doit pas simuler une capacité autonome par une succession improvisée de commandes manuelles.
+
+## 6. Gesture Arbitration — arbitrage des gestes
+
+Le `TouchInteractionRouter` reçoit les événements tactiles. Le `GestureArbitrator` décide quel outil peut les interpréter. Le `GestureOwnershipManager` conserve la propriété de chaque pointeur.
+
+### Modes exclusifs
+
+| Mode | Pilotage tactile | Trajectoire | Édition HUD |
+|---|---|---|---|
+| Pilotage | Selon configuration | Inactif | Inactive |
+| Tracé | Suspendu | Actif | Inactive |
+| Édition HUD | Suspendu | Inactif | Active |
+
+Priorité recommandée : édition HUD dans son contexte ; outil explicitement sélectionné (trajectoire, mesure, sélection) ; ATC/joysticks pour les contacts non réservés ; gestes généraux de l'interface ensuite.
+
+Les contrôles essentiels de sécurité doivent disposer de commandes UI explicites, non ambiguës avec un geste de dessin.
+
+### Transitions
+
+À chaque changement de mode :
+
+- invalider les gestes qui ne sont plus autorisés ;
+- neutraliser les axes des sources suspendues ;
+- libérer les pointeurs selon une procédure déterministe ;
+- interdire la réaffectation d'un pointeur déjà posé ;
+- exiger un nouveau `DOWN` pour une nouvelle interaction ;
+- vérifier les sources avant reprise.
+
+Gérer `ACTION_CANCEL`, perte de focus, interruption système, rotation, passage en arrière-plan, masquage du cockpit, disparition du viewport et perte de source. Aucun événement ne doit laisser un axe ou un pointeur bloqué.
+
+## 7. HUD Editing Mode — édition du cockpit
+
+### Objectif
+
+Tous les éléments HUD partagent un système d'édition direct. L'utilisateur peut déplacer, redimensionner et configurer les éléments depuis le cockpit.
+
+### Mode sûr
+
+À l'entrée en édition :
+
+- suspendre Gravity et les sources de pilotage tactiles ;
+- neutraliser les axes concernés selon la politique du profil ;
+- désactiver le tracé ;
+- réserver les gestes à l'éditeur ;
+- conserver vidéo et connexion si disponibles ;
+- afficher les poignées et limites des éléments.
+
+À la sortie, restaurer le contexte précédent sans réutiliser les contacts déjà posés. Un nouveau contact est nécessaire.
+
+### Éléments et opérations
+
+Éléments possibles : télémétrie, horizon artificiel, boussole, batterie, signal, commandes, indicateurs Gravity, repères caméra, trajectoire et panneaux flottants.
+
+Opérations : déplacement, redimensionnement, ancrage, marges, opacité, visibilité, restauration des valeurs par défaut, annulation/rétablissement si pris en charge et prévisualisation portrait/paysage.
+
+Les commandes de sécurité essentielles ne doivent pas pouvoir être déplacées hors d'une zone utilisable.
+
+### Budget HUD et viewport
+
+Les éléments persistants non essentiels ne devraient normalement pas dépasser 30 % de la surface visible du viewport caméra, afin de préserver au moins 70 % de vidéo dégagée. Les joysticks temporaires, outils temporaires et messages de sécurité peuvent être des exceptions.
+
+Les coordonnées doivent être normalisées par rapport au viewport réel après prise en compte des barres système, insets, ratio vidéo et mode fit/crop. Ne pas calculer les positions sur la seule base de la taille physique de l'écran.
+
+Prévoir des layouts portrait et paysage, éventuellement synchronisés, avec prévisualisation et conversion par coordonnées normalisées/ancrages.
+
+## 8. Coexistence des fonctionnalités
+
+### Gravity + ATC
+
+Configuration type : Gravity contrôle Pitch/Roll ; ATC gauche contrôle Throttle/Yaw. Le mixer empêche tout conflit de propriété d'axe.
+
+### Tracé avec ATC activé
+
+ATC reste activé dans les paramètres, mais ses zones sont suspendues pendant le tracé. Le tracé fonctionne partout sur la surface autorisée. À la sortie, seuls de nouveaux contacts peuvent activer les joysticks.
+
+### Tracé avec Gravity actif
+
+Le tracé tactile ne doit jamais être interprété par ATC. La politique recommandée est de suspendre également le pilotage manuel Gravity pendant le dessin et la validation afin d'éviter une commande involontaire pendant la planification. La reprise de Gravity doit utiliser une référence stable et une transition progressive.
+
+### Édition HUD avec toutes les sources
+
+L'édition suspend Gravity, ATC et le tracé. Les gestes sont exclusivement réservés à l'éditeur.
+
+### Outils futurs
+
+Le même mécanisme peut accueillir sélection d'objet, suivi visuel, mesure de distance, zone de surveillance, waypoints et annotations. Chaque outil déclare ses surfaces, gestes, pointeurs et priorités. Aucun outil ne détourne un pointeur déjà possédé.
+
+## 9. Modèles de configuration conceptuels
+
+Ces champs décrivent les besoins fonctionnels ; ils ne prescrivent pas encore une sérialisation définitive.
+
+### `GravityProfile`
+
+`enabled`, `sensorPreference`, `inputAxes`, `referenceOrientation`, `neutralReference`, `sensitivityPitch`, `sensitivityRoll`, `deadzonePitch`, `deadzoneRoll`, `maxTiltPitch`, `maxTiltRoll`, `responseCurve`, `smoothing`, `slewRateLimit`, `profilePreset`, `staleSensorTimeout`, `recenterPolicy`.
+
+### `TouchZoneConfig`
+
+`id`, `enabled`, `normalizedBounds`, `shape`, `hitArea`, `joystickMode`, `assignedAxes`, `invertAxes`, `sensitivity`, `deadzone`, `responseCurve`, `maxTravel`, `visualSize`, `opacity`, `orientation`, `pointerPolicy`, `releasePolicy`.
+
+### `TrajectoryToolConfig`
+
+`enabled`, `drawingSurface`, `pointerPolicy`, `strokeStyle`, `minimumPointSpacing`, `smoothingPolicy`, `simplificationPolicy`, `previewEnabled`, `requireExplicitConfirmation`, `executionCapabilityRequirement`, `cancelBehavior`.
+
+### `HudLayoutConfig`
+
+`orientation`, `viewportReference`, `elements`, `normalizedPosition`, `normalizedSize`, `anchors`, `margins`, `opacity`, `visibility`, `zOrder`, `locked`, `essential`.
+
+### `InteractionModeState`
+
+`mode`, `activeTool`, `activePointerOwners`, `suspendedInputSources`, `axisOwnership`, `transitionState`, `requiresFreshPointerDown`, `safetyStatus`.
+
+Utiliser un état central cohérent plutôt qu'une collection de booléens indépendants pouvant créer des combinaisons impossibles.
+
+## 10. Architecture logicielle indicative
+
+```text
+flight/
+├── input/
+│   ├── FlightInputSource
+│   ├── FlightInputState
+│   ├── FlightInputMixer
+│   └── AxisOwnershipManager
+├── interaction/
+│   ├── TouchInteractionRouter
+│   ├── GestureArbitrator
+│   ├── GestureOwnershipManager
+│   └── InteractionModeController
+├── gravity/
+│   ├── GravitySensorController
+│   ├── GravityOrientationMapper
+│   ├── GravityCalibrationController
+│   ├── GravitySignalProcessor
+│   └── GravityInputController
+├── touch/
+│   ├── TouchControlEngine
+│   ├── TouchZoneManager
+│   ├── PointerTracker
+│   ├── FloatingJoystickController
+│   ├── TouchCommandMapper
+│   └── TouchSafetyGuard
+├── trajectory/
+│   ├── TrajectoryDrawingController
+│   ├── TrajectoryGestureHandler
+│   ├── TrajectoryPathProcessor
+│   ├── TrajectoryPreviewController
+│   └── TrajectoryExecutionController
+└── control/
+    ├── FlightControlPipeline
+    ├── FlightCommandLimiter
+    ├── InputFreshnessGuard
+    └── DeviceSafetyPolicy
+
+ui/cockpit/
+├── hud/
+│   ├── HudLayoutEngine
+│   ├── HudElement
+│   ├── HudLayoutRepository
+│   ├── HudEditorController
+│   └── HudViewportConstraints
+└── controls/
+    ├── FloatingJoystickView
+    ├── TouchZoneOverlay
+    ├── GravityIndicator
+    └── TrajectoryOverlay
+```
+
+Responsabilités :
+- `TouchInteractionRouter` reçoit et distribue les événements, sans logique protocolaire.
+- `GestureArbitrator` applique priorités et propriété des gestes.
+- `FlightInputMixer` centralise sources, axes et neutralisation.
+- `GravitySignalProcessor` transforme les capteurs en commandes normalisées.
+- `TouchControlEngine` gère zones, pointeurs et joysticks flottants.
+- `TrajectoryPathProcessor` traite la géométrie sans inventer des données physiques.
+- `HudLayoutEngine` calcule la disposition dans le viewport.
+- `DeviceSafetyPolicy` définit les réactions spécifiques au drone.
+
+## 11. Sécurité : distinctions impératives
+
+Ne jamais confondre :
+
+- **Input neutral** : la source utilisateur ne fournit plus de commande ;
+- **Protocol neutral** : valeur neutre définie par le protocole ;
+- **Hold** : maintien d'une consigne ;
+- **Hover** : stabilisation de position ;
+- **Land** : commande d'atterrissage ;
+- **Failsafe** : comportement déclenché par une condition de sécurité.
+
+Le relâchement ATC, la suspension Gravity et les transitions de mode doivent suivre la politique du profil. Une perte de capteur invalide Gravity. Une perte de focus ou un `CANCEL` libère les pointeurs. La santé de la vidéo, de la télémétrie et du canal de commande doit être suivie séparément. La réception vidéo ne prouve pas à elle seule que le canal de commande fonctionne.
+
+L'activation d'une source n'arme pas le drone. Les capacités déclarées dans le profil doivent être étayées par des validations de protocole et de matériel.
+
+## 12. Ergonomie
+
+Le cockpit normal doit privilégier la vidéo et ne montrer que les contrôles nécessaires. Les zones ATC sont invisibles ou discrètes au repos ; les joysticks n'apparaissent que pendant le contact. L'indicateur Gravity est compact. Le tracé apparaît pendant le dessin, la prévisualisation et, si pris en charge, l'exécution. Les poignées HUD n'apparaissent qu'en mode édition.
+
+Les paramètres simples (activation, sensibilité, disposition, inversion) doivent être faciles à trouver. Les paramètres experts (courbes, filtrage, limites, politique de pointeurs, relâchement, profils par orientation) peuvent être regroupés dans un espace avancé. Ne pas encombrer le cockpit avec les informations internes, de permission, de connectivité ou de débogage.
+
+## 13. Critères d'acceptation et tests
+
+### Gravity Mode
+
+- [ ] Pitch et Roll suivent les axes configurés.
+- [ ] La position calibrée produit une commande neutre.
+- [ ] La deadzone empêche les oscillations parasites.
+- [ ] Portrait/paysage ne provoque ni inversion ni saut.
+- [ ] Une mesure périmée invalide la source.
+- [ ] Le recentrage est protégé contre un déclenchement accidentel.
+- [ ] La reprise après suspension est progressive.
+- [ ] Les axes non assignés restent inchangés.
+
+### ATC
+
+- [ ] `DOWN` affiche le joystick sans commander.
+- [ ] Seul le déplacement relatif commande.
+- [ ] `UP` masque le joystick et neutralise les axes assignés.
+- [ ] Le relâchement d'une zone ne désactive pas l'autre.
+- [ ] Les `pointerId` sont suivis correctement.
+- [ ] Un second doigt ne vole pas la propriété d'une zone occupée.
+- [ ] `CANCEL` libère la zone.
+- [ ] Le franchissement d'une frontière ne transfère pas le pointeur.
+- [ ] Les zones fonctionnent en portrait et paysage.
+- [ ] La géométrie utilise le viewport réel.
+
+### Trajectoire et arbitrage
+
+- [ ] En mode Tracé, aucune zone ATC ne déclenche de joystick.
+- [ ] Le tracé peut commencer dans chacune des zones et les traverser.
+- [ ] Un joystick actif est neutralisé selon la politique du profil à l'entrée du tracé.
+- [ ] Un pointeur déjà posé n'est pas réinterprété après changement de mode.
+- [ ] La fin du dessin ne déclenche pas l'exécution.
+- [ ] Validation et annulation sont explicites.
+- [ ] Aucun contact encore posé ne réactive ATC à la sortie du mode.
+- [ ] Un drone sans capacité de trajectoire ne prétend pas l'exécuter.
+
+### HUD Editing
+
+- [ ] L'entrée en édition suspend les commandes.
+- [ ] Le déplacement HUD ne génère aucune commande de vol.
+- [ ] Déplacement, redimensionnement et ancrage respectent les limites.
+- [ ] Les éléments essentiels restent accessibles.
+- [ ] Portrait/paysage sont restaurés correctement.
+- [ ] Le viewport réel est la référence de coordonnées.
+- [ ] Le budget de surface est respecté.
+- [ ] La reprise exige un nouveau contact.
+
+### Intégration et sécurité
+
+- [ ] Perte de capteur, `ACTION_CANCEL`, perte de focus et rotation ne laissent aucun axe bloqué.
+- [ ] Aucun saut de commande lors d'un changement de mode.
+- [ ] Aucune source ne commande un même axe en conflit.
+- [ ] Suspendre une source ne déconnecte pas le drone.
+- [ ] Le relâchement est testé sur le matériel correspondant.
+- [ ] Les capacités de trajectoire et de maintien sont prouvées par profil.
+
+Les tests unitaires doivent couvrir transformations, courbes, géométrie, pointeurs et transitions. Les tests d'intégration vérifient les commandes normalisées et les paquets protocolaires. Les tests sur drone réel valident les réactions physiques, notamment au relâchement du throttle et à la perte de source. Des données fictives ne constituent pas une preuve de compatibilité matérielle.
+
+## 14. Ordre de développement recommandé
+
+1. **Fondations :** modèle d'entrée, mixer, propriété des axes, routeur tactile, modes et transitions.
+2. **ATC :** zones, `pointerId`, ancre neutre, joysticks flottants, multitouch et réglages.
+3. **Gravity :** capteurs, mapping, calibration, filtrage, deadzone, courbes et transitions d'orientation.
+4. **Trajectoire :** réservation des gestes, prévisualisation, correction, annulation, validation et exécution conditionnée aux capacités.
+5. **HUD Editing :** modèle des éléments, layout viewport, déplacement, redimensionnement, ancrage et orientations.
+6. **Validation :** combinaisons de modes, politiques de relâchement et essais matériels par profil.
+
+## 15. Décisions finales à retenir
+
+1. Gravity Mode est une source d'entrée universelle par inclinaison, avec mapping cockpit, calibration et réglages avancés.
+2. ATC offre deux zones indépendantes ; le contact crée une ancre neutre, le déplacement commande et le relâchement masque le joystick et neutralise ses axes sans déconnecter le drone.
+3. Le tracé de trajectoire peut utiliser les zones ATC ; en mode Tracé, ATC est suspendu et ne reçoit aucun geste.
+4. Gesture Arbitration garantit qu'un pointeur appartient à un seul outil et qu'un contact existant n'est jamais réinterprété lors d'un changement de mode.
+5. HUD Editing suspend les sources de pilotage et réserve les gestes à l'édition.
+6. Le HUD est géré par un moteur commun, avec coordonnées normalisées du viewport et dispositions portrait/paysage.
+7. Le FlightInputMixer centralise les sources et la propriété des axes.
+8. DeviceSafetyPolicy définit les comportements réels par drone ; neutre ne signifie pas stationnaire.
+9. La trajectoire n'est exécutable que si le profil du drone confirme cette capacité.
+10. La validation inclut tests logiciels, captures protocolaires et essais matériels.
+
+## 16. Résultat attendu
+
+Le cockpit AUTOPILOT doit devenir un environnement de pilotage adaptable et cohérent. Gravity Mode offre une commande analogique naturelle par inclinaison. ATC fournit des joysticks contextuels apparaissant sous les doigts sans commande au simple contact. Le tracé virtuel réserve la surface tactile et ne déclenche jamais les joysticks. L'édition HUD permet de personnaliser le cockpit sans risque de transmettre des commandes involontaires.
+
+La fiabilité repose sur une fondation commune : sources d'entrée indépendantes, propriété des gestes, arbitrage centralisé, propriété des axes, transitions sûres et politiques spécifiques à chaque drone. Il ne s'agit pas de juxtaposer des composants visuels, mais de construire un véritable système d'interaction et de commande de vol extensible.

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -50,11 +51,14 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -67,6 +71,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.autopilot.core.common.VerificationStatus
 import com.autopilot.designsystem.AutopilotButton
 import com.autopilot.designsystem.AutopilotButtonTone
 import com.autopilot.designsystem.AutopilotCard
@@ -75,10 +80,16 @@ import com.autopilot.designsystem.StatusBadge
 import com.autopilot.designsystem.StatusTone
 import com.autopilot.designsystem.ThemeAppearanceMode
 import com.autopilot.drone.protocolapi.VideoTransportType
+import com.autopilot.flight.control.FlightState
+import com.autopilot.flight.gravity.GravityPreset
+import com.autopilot.flight.gravity.GravityResponseCurve
+import com.autopilot.flight.input.StickInputProfile
+import com.autopilot.flight.touch.JoystickMode
 import com.autopilot.video.MvFilterPreset
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -173,6 +184,8 @@ fun SettingsAircraftScreen(
   val videoOverride by viewModel.videoTransportOverride.collectAsStateWithLifecycle()
   val wifiLink by viewModel.wifiLink.collectAsStateWithLifecycle()
   val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
+  val flightState by viewModel.flightState.collectAsStateWithLifecycle()
+  val diagSummary by viewModel.diagSummary.collectAsStateWithLifecycle()
   val detectedMatch = remember(wifiLink.ssid) { viewModel.detectedProtocolFromWifi() }
   val detectedMatches = remember(wifiLink.ssid) {
     wifiLink.ssid?.let { com.autopilot.drone.protocolapi.ProtocolCompatibilityRegistry.findMatchesBySsid(it) }
@@ -182,11 +195,19 @@ fun SettingsAircraftScreen(
   var videoPortText by remember {
     mutableStateOf(if (prefs.customVideoPort > 0) prefs.customVideoPort.toString() else "")
   }
+  var passwordDigits by remember { mutableStateOf("") }
+  var showServoProbeDialog by remember { mutableStateOf(false) }
 
   LaunchedEffect(prefs.customRtspPath, prefs.customVideoPort) {
     if (rtspPathText != prefs.customRtspPath) rtspPathText = prefs.customRtspPath
     val expectedPortStr = if (prefs.customVideoPort > 0) prefs.customVideoPort.toString() else ""
     if (videoPortText != expectedPortStr) videoPortText = expectedPortStr
+  }
+
+  LaunchedEffect(flightState, selectedEntry.descriptor.id) {
+    if (flightState != FlightState.Disconnected) {
+      viewModel.refreshDiagSummary()
+    }
   }
 
   val requiredPermissions = remember {
@@ -401,6 +422,34 @@ fun SettingsAircraftScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth().testTag("custom_video_port_input"),
           )
+          Spacer(Modifier.height(10.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text(
+                "Allow Experimental Flight Commands",
+                style = MaterialTheme.typography.bodyMedium,
+                color = theme.colors.textPrimary,
+              )
+              Text(
+                if (desc.verificationStatus == VerificationStatus.EXPERIMENTAL) {
+                  "Required to arm/fly experimental profiles like ${desc.displayName}"
+                } else {
+                  "Permits arming & flight commands on experimental profiles (e.g. X69 LG)"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = theme.colors.textSecondary,
+              )
+            }
+            Switch(
+              checked = prefs.allowExperimentalFlightCommands,
+              onCheckedChange = { viewModel.updateExperimentalFlightAllowed(it) },
+              modifier = Modifier.testTag("allow_experimental_commands_switch"),
+            )
+          }
         }
       }
 
@@ -571,10 +620,104 @@ fun SettingsAircraftScreen(
             if (caps.supportsHeadlessMode) StatusBadge("Headless Mode", StatusTone.NOMINAL)
             if (caps.supportsGyroCalibration) StatusBadge("Gyro Cal", StatusTone.NOMINAL)
             if (caps.supportsCameraTilt) StatusBadge("Camera Tilt", StatusTone.NOMINAL)
+            if (caps.supportsLightControl) StatusBadge("Lights", StatusTone.NOMINAL)
+            if (caps.supportsFixedHeightFlag) StatusBadge("Alt-Hold Bit", StatusTone.NOMINAL)
+            if (caps.supportsCooingdvPassword) StatusBadge("0x0A Password", StatusTone.NOMINAL)
             if (caps.supportsPhotoCapture) StatusBadge("Snapshot", StatusTone.NOMINAL)
             if (caps.supportsVideoRecording) StatusBadge("MP4 Record", StatusTone.NOMINAL)
             if (caps.supportsFirmwareSdCapture) StatusBadge("SD Trigger", StatusTone.NOMINAL)
             if (caps.supportsEmergencyMotorStop) StatusBadge("E-Stop", StatusTone.WARNING)
+          }
+        }
+      }
+
+      if (selectedEntry.capabilities.supportsCooingdvPassword) {
+        item {
+          AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+            Text(
+              text = "CooingDV Wi-Fi Password (0x0A)",
+              style = MaterialTheme.typography.titleMedium,
+              color = theme.colors.textPrimary,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+              text = "Sends 8 numeric digits (0-9) to CooingDV firmware IDs 80/81/82/85 on active connection.",
+              style = MaterialTheme.typography.bodySmall,
+              color = theme.colors.textSecondary,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              OutlinedTextField(
+                value = passwordDigits,
+                onValueChange = { next -> passwordDigits = next.filter { it.isDigit() }.take(8) },
+                label = { Text("8-Digit PIN") },
+                placeholder = { Text("12345678") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+                modifier = Modifier.weight(1f).testTag("cooingdv_password_input"),
+              )
+              AutopilotButton(
+                text = "Send",
+                onClick = {
+                  val ok = viewModel.sendCooingdvPassword(passwordDigits)
+                  Toast.makeText(
+                    context,
+                    if (ok) "0x0A password packet transmitted" else "Connect first and enter 8 digits",
+                    Toast.LENGTH_SHORT,
+                  ).show()
+                },
+                enabled = passwordDigits.length == 8 && flightState != FlightState.Disconnected,
+                compact = true,
+                tag = "cooingdv_password_send",
+              )
+            }
+          }
+        }
+      }
+
+      item {
+        val caps = selectedEntry.capabilities
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(
+              text = "Link Diagnostics & Ground Probe",
+              style = MaterialTheme.typography.titleMedium,
+              color = theme.colors.textPrimary,
+              modifier = Modifier.weight(1f).padding(end = 8.dp),
+            )
+            AutopilotButton(
+              text = "Refresh",
+              onClick = { viewModel.refreshDiagSummary() },
+              tone = AutopilotButtonTone.SECONDARY,
+              compact = true,
+              tag = "refresh_diag_button",
+            )
+          }
+          Spacer(Modifier.height(6.dp))
+          Text(
+            text = diagSummary.ifBlank { "No active diagnostic capture (connect aircraft link to inspect CooingDV ID / Jieli :1234 probe)." },
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.colors.textSecondary,
+            modifier = Modifier.testTag("diag_summary_text"),
+          )
+          if (!caps.isVideoOnly) {
+            Spacer(Modifier.height(10.dp))
+            AutopilotButton(
+              text = "Ground Servo / Aux Probe",
+              onClick = { showServoProbeDialog = true },
+              enabled = flightState != FlightState.Disconnected,
+              tone = AutopilotButtonTone.SECONDARY,
+              compact = true,
+              tag = "servo_probe_open_button",
+            )
           }
         }
       }
@@ -634,9 +777,100 @@ fun SettingsAircraftScreen(
       }
     }
   }
+
+  if (showServoProbeDialog) {
+    ServoProbeDialog(
+      onUpdateProbe = { enabled, byteIdx, hexVal ->
+        viewModel.setServoProbe(enabled, byteIdx, hexVal)
+      },
+      onDismiss = {
+        viewModel.setServoProbe(false, 9, 0)
+        showServoProbeDialog = false
+      },
+    )
+  }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ServoProbeDialog(
+  onUpdateProbe: (enabled: Boolean, byteIndex: Int, hexValue: Int) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  var byteIndex by remember { mutableIntStateOf(9) }
+  var hexValue by remember { mutableIntStateOf(0) }
+  var active by remember { mutableStateOf(false) }
+
+  DisposableEffect(Unit) {
+    onDispose { onUpdateProbe(false, 9, 0) }
+  }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text("Ground Servo / Aux Probe") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+          text = "Bench-test bytes 9..18 of the 21B FH8620/66-series TX frame (zeros flight sticks). Keep propellers clear.",
+          style = MaterialTheme.typography.bodySmall,
+        )
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+          (9..18).forEach { idx ->
+            FilterChip(
+              selected = byteIndex == idx,
+              onClick = {
+                byteIndex = idx
+                if (active) onUpdateProbe(true, byteIndex, hexValue)
+              },
+              label = { Text("B$idx") },
+            )
+          }
+        }
+        Text(
+          text = "Byte $byteIndex Value: 0x${hexValue.toString(16).uppercase().padStart(2, '0')} ($hexValue)",
+          style = MaterialTheme.typography.labelMedium,
+        )
+        Slider(
+          value = hexValue.toFloat(),
+          onValueChange = { next ->
+            hexValue = next.roundToInt().coerceIn(0, 255)
+            if (active) onUpdateProbe(true, byteIndex, hexValue)
+          },
+          valueRange = 0f..255f,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          AutopilotButton(
+            text = if (active) "Sending..." else "Send Probe",
+            onClick = {
+              active = true
+              onUpdateProbe(true, byteIndex, hexValue)
+            },
+            compact = true,
+            tag = "servo_probe_send_button",
+          )
+          AutopilotButton(
+            text = "Stop / Zero",
+            onClick = {
+              active = false
+              onUpdateProbe(false, 9, 0)
+            },
+            tone = AutopilotButtonTone.SECONDARY,
+            compact = true,
+            tag = "servo_probe_stop_button",
+          )
+        }
+      }
+    },
+    confirmButton = {
+      TextButton(onClick = onDismiss) { Text("Close") }
+    },
+  )
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsFlightControlsScreen(
   viewModel: AutopilotViewModel,
@@ -647,6 +881,49 @@ fun SettingsFlightControlsScreen(
   val sensitivity by viewModel.sensitivity.collectAsStateWithLifecycle()
   val prefs by viewModel.userPrefs.collectAsStateWithLifecycle()
   val gamepadStatus by viewModel.gamepadStatus.collectAsStateWithLifecycle()
+  val safetyEval by viewModel.deviceSafetyEvaluation.collectAsStateWithLifecycle()
+
+  fun pushAdvanced(
+    stickInputProfile: StickInputProfile = prefs.stickInputProfile,
+    atcJoystickMode: JoystickMode = prefs.atcJoystickMode,
+    atcSensitivity: Float = prefs.atcSensitivity,
+    atcDeadzone: Float = prefs.atcDeadzone,
+    atcMaxTravelDp: Float = prefs.atcMaxTravelDp,
+    atcOpacity: Float = prefs.atcOpacity,
+    atcInvertThrottle: Boolean = prefs.atcInvertThrottle,
+    atcInvertPitch: Boolean = prefs.atcInvertPitch,
+    atcInvertRoll: Boolean = prefs.atcInvertRoll,
+    atcInvertYaw: Boolean = prefs.atcInvertYaw,
+    atcSwapZones: Boolean = prefs.atcSwapZones,
+    gravityPreset: GravityPreset = prefs.gravityPreset,
+    gravityCurve: GravityResponseCurve = prefs.gravityCurve,
+    gravitySensitivityPitch: Float = prefs.gravitySensitivityPitch,
+    gravitySensitivityRoll: Float = prefs.gravitySensitivityRoll,
+    gravityDeadzoneDeg: Float = prefs.gravityDeadzoneDeg,
+    gravitySmoothingAlpha: Float = prefs.gravitySmoothingAlpha,
+    gravitySlewRatePerSec: Float = prefs.gravitySlewRatePerSec,
+  ) {
+    viewModel.updateAtcAndGravityAdvancedSettings(
+      stickInputProfile = stickInputProfile,
+      atcJoystickMode = atcJoystickMode,
+      atcSensitivity = atcSensitivity,
+      atcDeadzone = atcDeadzone,
+      atcMaxTravelDp = atcMaxTravelDp,
+      atcOpacity = atcOpacity,
+      atcInvertThrottle = atcInvertThrottle,
+      atcInvertPitch = atcInvertPitch,
+      atcInvertRoll = atcInvertRoll,
+      atcInvertYaw = atcInvertYaw,
+      atcSwapZones = atcSwapZones,
+      gravityPreset = gravityPreset,
+      gravityCurve = gravityCurve,
+      gravitySensitivityPitch = gravitySensitivityPitch,
+      gravitySensitivityRoll = gravitySensitivityRoll,
+      gravityDeadzoneDeg = gravityDeadzoneDeg,
+      gravitySmoothingAlpha = gravitySmoothingAlpha,
+      gravitySlewRatePerSec = gravitySlewRatePerSec,
+    )
+  }
 
   Scaffold(
     modifier = modifier.fillMaxSize(),
@@ -663,6 +940,276 @@ fun SettingsFlightControlsScreen(
     ) {
       item {
         AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth(), elevated = true) {
+          Text(
+            text = "Touch & Gravity Control Profile",
+            style = MaterialTheme.typography.titleMedium,
+            color = theme.colors.textPrimary,
+          )
+          Spacer(Modifier.height(6.dp))
+          Text(
+            text = safetyEval.releaseWarning,
+            style = MaterialTheme.typography.bodySmall,
+            color = theme.colors.textSecondary,
+          )
+          Spacer(Modifier.height(10.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            StickInputProfile.entries.forEach { profile ->
+              FilterChip(
+                selected = prefs.stickInputProfile == profile,
+                onClick = { pushAdvanced(stickInputProfile = profile) },
+                leadingIcon =
+                  if (prefs.stickInputProfile == profile) {
+                    { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                  } else null,
+                label = { Text(profile.label) },
+                modifier = Modifier.testTag("stick_profile_${profile.name.lowercase()}"),
+              )
+            }
+          }
+        }
+      }
+
+      item {
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Text(
+            text = "ATC Floating Zone Tuning",
+            style = MaterialTheme.typography.titleMedium,
+            color = theme.colors.textPrimary,
+          )
+          Spacer(Modifier.height(8.dp))
+          Text(
+            text = "ATC Joystick Behavior",
+            style = MaterialTheme.typography.labelMedium,
+            color = theme.colors.textSecondary,
+          )
+          Spacer(Modifier.height(4.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            JoystickMode.entries.forEach { mode ->
+              FilterChip(
+                selected = prefs.atcJoystickMode == mode,
+                onClick = { pushAdvanced(atcJoystickMode = mode) },
+                label = { Text(mode.label) },
+                modifier = Modifier.testTag("atc_joystick_mode_${mode.name.lowercase()}"),
+              )
+            }
+          }
+          Spacer(Modifier.height(8.dp))
+          TuningSlider(
+            label = "ATC Sensitivity",
+            valueLabel = "${(prefs.atcSensitivity * 100).toInt()}%",
+            value = prefs.atcSensitivity,
+            range = 0.50f..1.40f,
+            onValueChange = { pushAdvanced(atcSensitivity = it) },
+          )
+          TuningSlider(
+            label = "ATC Deadzone",
+            valueLabel = "${(prefs.atcDeadzone * 100).toInt()}%",
+            value = prefs.atcDeadzone,
+            range = 0.0f..0.20f,
+            onValueChange = { pushAdvanced(atcDeadzone = it) },
+          )
+          TuningSlider(
+            label = "Floating Travel Radius",
+            valueLabel = "${prefs.atcMaxTravelDp.toInt()} dp",
+            value = prefs.atcMaxTravelDp,
+            range = 40f..88f,
+            onValueChange = { pushAdvanced(atcMaxTravelDp = it) },
+          )
+          TuningSlider(
+            label = "Joystick Opacity",
+            valueLabel = "${(prefs.atcOpacity * 100).toInt()}%",
+            value = prefs.atcOpacity,
+            range = 0.35f..1.0f,
+            onValueChange = { pushAdvanced(atcOpacity = it) },
+          )
+          Spacer(Modifier.height(6.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+              Text("Swap Left / Right Zones", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+              Text("Switches Throttle/Yaw and Roll/Pitch halves", style = MaterialTheme.typography.bodySmall, color = theme.colors.textSecondary)
+            }
+            Switch(
+              checked = prefs.atcSwapZones,
+              onCheckedChange = { pushAdvanced(atcSwapZones = it) },
+              modifier = Modifier.testTag("atc_swap_zones_switch"),
+            )
+          }
+          Spacer(Modifier.height(6.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text("Invert Throttle Axis", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+            Switch(
+              checked = prefs.atcInvertThrottle,
+              onCheckedChange = { pushAdvanced(atcInvertThrottle = it) },
+              modifier = Modifier.testTag("atc_invert_throttle_switch"),
+            )
+          }
+          Spacer(Modifier.height(6.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text("Invert Pitch Axis", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+            Switch(
+              checked = prefs.atcInvertPitch,
+              onCheckedChange = { pushAdvanced(atcInvertPitch = it) },
+              modifier = Modifier.testTag("atc_invert_pitch_switch"),
+            )
+          }
+          Spacer(Modifier.height(6.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text("Invert Roll Axis", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+            Switch(
+              checked = prefs.atcInvertRoll,
+              onCheckedChange = { pushAdvanced(atcInvertRoll = it) },
+              modifier = Modifier.testTag("atc_invert_roll_switch"),
+            )
+          }
+          Spacer(Modifier.height(6.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text("Invert Yaw Axis", style = MaterialTheme.typography.bodyMedium, color = theme.colors.textPrimary)
+            Switch(
+              checked = prefs.atcInvertYaw,
+              onCheckedChange = { pushAdvanced(atcInvertYaw = it) },
+              modifier = Modifier.testTag("atc_invert_yaw_switch"),
+            )
+          }
+        }
+      }
+
+      item {
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(
+              text = "Gravity Advanced Tuning",
+              style = MaterialTheme.typography.titleMedium,
+              color = theme.colors.textPrimary,
+              modifier = Modifier.weight(1f).padding(end = 8.dp),
+            )
+            AutopilotButton(
+              text = "Reset Cal",
+              onClick = { viewModel.gravityHandler.processor.resetAll() },
+              tone = AutopilotButtonTone.SECONDARY,
+              compact = true,
+              tag = "gravity_reset_cal_button",
+            )
+          }
+          Spacer(Modifier.height(8.dp))
+          Text(
+            text = "Preset",
+            style = MaterialTheme.typography.labelMedium,
+            color = theme.colors.textSecondary,
+          )
+          Spacer(Modifier.height(4.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            GravityPreset.entries.forEach { preset ->
+              FilterChip(
+                selected = prefs.gravityPreset == preset,
+                onClick = {
+                  pushAdvanced(
+                    gravityPreset = preset,
+                    gravitySensitivityPitch = preset.sensitivity,
+                    gravitySensitivityRoll = preset.sensitivity,
+                    gravityDeadzoneDeg = preset.deadzoneDeg,
+                    gravitySmoothingAlpha = preset.smoothingAlpha,
+                    gravitySlewRatePerSec = preset.slewRatePerSec,
+                  )
+                },
+                label = { Text(preset.label) },
+                modifier = Modifier.testTag("gravity_preset_${preset.name.lowercase()}"),
+              )
+            }
+          }
+          Spacer(Modifier.height(8.dp))
+          Text(
+            text = "Response Curve",
+            style = MaterialTheme.typography.labelMedium,
+            color = theme.colors.textSecondary,
+          )
+          Spacer(Modifier.height(4.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            GravityResponseCurve.entries.forEach { curve ->
+              FilterChip(
+                selected = prefs.gravityCurve == curve,
+                onClick = { pushAdvanced(gravityCurve = curve) },
+                label = { Text(curve.label) },
+                modifier = Modifier.testTag("gravity_curve_${curve.name.lowercase()}"),
+              )
+            }
+          }
+          Spacer(Modifier.height(8.dp))
+          TuningSlider(
+            label = "Pitch Sensitivity",
+            valueLabel = "${(prefs.gravitySensitivityPitch * 100).toInt()}%",
+            value = prefs.gravitySensitivityPitch,
+            range = 0.40f..1.45f,
+            onValueChange = { pushAdvanced(gravitySensitivityPitch = it) },
+          )
+          TuningSlider(
+            label = "Roll Sensitivity",
+            valueLabel = "${(prefs.gravitySensitivityRoll * 100).toInt()}%",
+            value = prefs.gravitySensitivityRoll,
+            range = 0.40f..1.45f,
+            onValueChange = { pushAdvanced(gravitySensitivityRoll = it) },
+          )
+          TuningSlider(
+            label = "Tilt Deadzone",
+            valueLabel = "${"%.1f".format(prefs.gravityDeadzoneDeg)}°",
+            value = prefs.gravityDeadzoneDeg,
+            range = 1.0f..10.0f,
+            onValueChange = { pushAdvanced(gravityDeadzoneDeg = it) },
+          )
+          TuningSlider(
+            label = "IMU Smoothing Alpha",
+            valueLabel = "${"%.2f".format(prefs.gravitySmoothingAlpha)}",
+            value = prefs.gravitySmoothingAlpha,
+            range = 0.12f..0.85f,
+            onValueChange = { pushAdvanced(gravitySmoothingAlpha = it) },
+          )
+          TuningSlider(
+            label = "Slew Rate Limit",
+            valueLabel = "${"%.1f".format(prefs.gravitySlewRatePerSec)} /s",
+            value = prefs.gravitySlewRatePerSec,
+            range = 1.0f..7.0f,
+            onValueChange = { pushAdvanced(gravitySlewRatePerSec = it) },
+          )
+        }
+      }
+
+      item {
+        AutopilotCard(modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
           Text(
             text = "Stick Response",
             style = MaterialTheme.typography.titleMedium,

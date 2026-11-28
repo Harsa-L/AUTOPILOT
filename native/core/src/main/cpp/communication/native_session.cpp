@@ -307,16 +307,35 @@ bool NativeSession::start() {
 
   jieli_date_sent_ = false;
   jieli_stream_requested_ = false;
+  jieli_udp_access_sent_ = false;
+  jieli_udp_date_sent_ = false;
+  jieli_udp_stream_requested_ = false;
+  jieli_udp_last_stream_req_ms_ = 0;
   jieli_video_w_ = 640;
   jieli_video_h_ = 480;
   jieli_video_fps_ = 25;
+  jieli_keepalive_interval_ms_ = 7500;
   jieli_last_stream_req_ms_ = 0;
   jieli_last_video_rx_ms_ = now_ms();
   jieli_last_keepalive_ms_ = 0;
+  jieli_diag_started_ms_ = 0;
+  jieli_diag_finished_ = false;
+  jieli_diag_pkt_count_.store(0, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(hex_mutex_);
+    jieli_diag_sample_hex_.clear();
+  }
 
   lewei_last_video_rx_ms_ = now_ms();
   lewei_last_keepalive_ms_ = 0;
   last_heartbeat_ms_ = 0;
+  last_cooingdv_photo_ctr_ = -1;
+  last_cooingdv_video_ctr_ = -1;
+  detected_cooingdv_id_.store(-1, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    servo_probe_enabled_ = false;
+  }
 
   packets_sent_.store(0, std::memory_order_relaxed);
   packets_received_.store(0, std::memory_order_relaxed);
@@ -412,11 +431,19 @@ void NativeSession::close_sockets() {
     ::close(rtsp_rtp_udp_fd_);
     rtsp_rtp_udp_fd_ = -1;
   }
+  if (jieli_diag_1234_fd_ >= 0) {
+    ::close(jieli_diag_1234_fd_);
+    jieli_diag_1234_fd_ = -1;
+  }
 }
 
 void NativeSession::stop() {
   if (!running_.exchange(false, std::memory_order_acq_rel)) {
     return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    servo_probe_enabled_ = false;
   }
   if (worker_.joinable()) {
     worker_.join();
@@ -444,6 +471,10 @@ void NativeSession::set_control_armed(bool armed) {
   if (protocol::is_video_only_family(config_.family)) {
     control_armed_.store(false, std::memory_order_release);
     return;
+  }
+  if (!armed) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    servo_probe_enabled_ = false;
   }
   control_armed_.store(armed, std::memory_order_release);
 }
@@ -486,20 +517,28 @@ void NativeSession::update_sticks(float roll, float pitch, float throttle, float
 void NativeSession::trigger_action(uint32_t action_flag_bit) {
   if (protocol::is_video_only_family(config_.family)) return;
   std::lock_guard<std::mutex> lock(state_mutex_);
-  if ((action_flag_bit & protocol::ActionFlag::kLatchedMask) != 0) {
-    latched_actions_ |= (action_flag_bit & protocol::ActionFlag::kLatchedMask);
+  uint32_t effective_latch_mask = protocol::ActionFlag::kLatchedMask;
+  int pulse_ticks = 4;
+  if (config_.family == protocol::Family::FLOW_KY_Y_SERIES &&
+      (action_flag_bit & protocol::ActionFlag::HEADLESS) != 0) {
+    // FLOW_KY_Y_SERIES cmd=0x04 toggles firmware headless mode; send as finite 0.5s pulse @ 20 Hz.
+    effective_latch_mask &= ~protocol::ActionFlag::HEADLESS;
+    pulse_ticks = 10;
   }
-  const uint32_t pulse_bits = action_flag_bit & ~protocol::ActionFlag::kLatchedMask;
+  if ((action_flag_bit & effective_latch_mask) != 0) {
+    latched_actions_ |= (action_flag_bit & effective_latch_mask);
+  }
+  const uint32_t pulse_bits = action_flag_bit & ~effective_latch_mask;
   if (pulse_bits == 0) return;
 
   for (auto& slot : active_pulses_) {
     if (slot.flag == pulse_bits || slot.ticks_remaining <= 0) {
       slot.flag = pulse_bits;
-      slot.ticks_remaining = 4;
+      slot.ticks_remaining = pulse_ticks;
       return;
     }
   }
-  active_pulses_[0] = PulseEntry{pulse_bits, 4};
+  active_pulses_[0] = PulseEntry{pulse_bits, pulse_ticks};
 }
 
 void NativeSession::trigger_flip(int32_t direction) {
@@ -528,6 +567,12 @@ void NativeSession::trigger_flip(int32_t direction) {
 }
 
 void NativeSession::set_latched_action(uint32_t action_flag_bit, bool enabled) {
+  if (config_.family == protocol::Family::FLOW_KY_Y_SERIES &&
+      (action_flag_bit & protocol::ActionFlag::HEADLESS) != 0) {
+    // FLOW_KY_Y_SERIES cmd=0x04 is a toggle edge: always pulse finite 0.5s rather than latching.
+    trigger_action(protocol::ActionFlag::HEADLESS);
+    return;
+  }
   std::lock_guard<std::mutex> lock(state_mutex_);
   const uint32_t masked = action_flag_bit & protocol::ActionFlag::kLatchedMask;
   if (enabled) {
@@ -540,6 +585,7 @@ void NativeSession::set_latched_action(uint32_t action_flag_bit, bool enabled) {
 void NativeSession::clear_actions() {
   std::lock_guard<std::mutex> lock(state_mutex_);
   latched_actions_ = 0;
+  servo_probe_enabled_ = false;
   for (auto& slot : active_pulses_) {
     slot = PulseEntry{};
   }
@@ -553,6 +599,32 @@ void NativeSession::clear_actions() {
 
 void NativeSession::request_keyframe() {
   keyframe_requested_.store(true, std::memory_order_release);
+}
+
+void NativeSession::set_servo_probe(bool enabled, int32_t byte_index, int32_t hex_value) {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  servo_probe_enabled_ = enabled && !control_is_tcp_ && !protocol::is_video_only_family(config_.family);
+  servo_probe_byte_index_ = static_cast<uint8_t>(std::clamp(byte_index, 9, 18));
+  servo_probe_hex_value_ = static_cast<uint8_t>(std::clamp(hex_value, 0, 255));
+}
+
+bool NativeSession::send_cooingdv_password(const std::string& digits_8) {
+  if (control_fd_ < 0 || control_is_tcp_) return false;
+  const auto pkt = protocol::encode_cooingdv_password_packet(digits_8);
+  if (pkt.empty()) return false;
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(config_.control_port));
+  if (::inet_pton(AF_INET, config_.host_ip.c_str(), &addr.sin_addr) != 1) return false;
+  const ssize_t sent = ::sendto(control_fd_, pkt.data(), pkt.size(), 0,
+                                reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+  if (sent > 0) {
+    packets_sent_.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(hex_mutex_);
+    last_command_hex_ = bytes_to_hex(pkt);
+    return true;
+  }
+  return false;
 }
 
 SessionSnapshot NativeSession::snapshot() {
@@ -570,9 +642,13 @@ SessionSnapshot NativeSession::snapshot() {
   snap.battery_percent = battery_percent_.load(std::memory_order_relaxed);
   snap.firmware_status_flags = firmware_status_flags_.load(std::memory_order_relaxed);
   snap.control_armed = control_armed_.load(std::memory_order_relaxed);
+  snap.jieli_diag_1234_packets = jieli_diag_pkt_count_.load(std::memory_order_relaxed);
+  snap.detected_cooingdv_id = detected_cooingdv_id_.load(std::memory_order_relaxed);
+  snap.cooingdv_gl_detected = cooingdv_gl_detected_.load(std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lock(hex_mutex_);
     snap.last_command_hex = last_command_hex_;
+    snap.jieli_diag_sample_hex = jieli_diag_sample_hex_;
   }
   return snap;
 }
@@ -601,7 +677,7 @@ void NativeSession::parse_jieli_ctp_buffer() {
     if (avail < 10u + topic_len + json_len) break;
     const std::string json(reinterpret_cast<const char*>(ptr + 10 + topic_len), json_len);
 
-    if (topic == "VIDEO_PARAM") {
+    if (topic == "VIDEO_PARAM" || topic == "KEEP_ALIVE_INTERVAL") {
       auto parse_int = [&](const char* key, int32_t fallback) -> int32_t {
         const size_t pos = json.find(key);
         if (pos == std::string::npos) return fallback;
@@ -610,9 +686,17 @@ void NativeSession::parse_jieli_ctp_buffer() {
         const int v = std::atoi(json.c_str() + j);
         return v > 0 ? v : fallback;
       };
-      jieli_video_w_ = parse_int("\"w\"", jieli_video_w_);
-      jieli_video_h_ = parse_int("\"h\"", jieli_video_h_);
-      jieli_video_fps_ = parse_int("\"fps\"", jieli_video_fps_);
+      if (topic == "VIDEO_PARAM") {
+        jieli_video_w_ = parse_int("\"w\"", jieli_video_w_);
+        jieli_video_h_ = parse_int("\"h\"", jieli_video_h_);
+        jieli_video_fps_ = parse_int("\"fps\"", jieli_video_fps_);
+      } else {
+        int32_t timeout_val = parse_int("\"timeout\"", -1);
+        if (timeout_val > 0) {
+          if (timeout_val < 1000) timeout_val *= 1000;
+          jieli_keepalive_interval_ms_ = std::clamp<int64_t>(timeout_val / 4, 2000, 15000);
+        }
+      }
     }
 
     const auto parsed =
@@ -707,11 +791,52 @@ void NativeSession::poll_jieli_tcp(int64_t now_millis) {
     }
   }
 
-  if (jieli_stream_requested_ && now_millis - jieli_last_keepalive_ms_ >= 7500) {
+  if (jieli_stream_requested_ && now_millis - jieli_last_keepalive_ms_ >= jieli_keepalive_interval_ms_) {
     const auto ka = protocol::encode_heartbeat_packet(protocol::Family::JIELI_AC79);
     if (::send(control_fd_, ka.data(), ka.size(), MSG_NOSIGNAL) > 0) {
       packets_sent_.fetch_add(1, std::memory_order_relaxed);
       jieli_last_keepalive_ms_ = now_millis;
+    }
+  }
+
+  // Diagnostic UDP :1234 sniffer for 30s or 20 packets when 5s elapses with 0 video packets
+  const uint64_t vid_pkts = video_packets_received_.load(std::memory_order_relaxed);
+  if (vid_pkts > 0 && jieli_diag_1234_fd_ >= 0) {
+    ::close(jieli_diag_1234_fd_);
+    jieli_diag_1234_fd_ = -1;
+    jieli_diag_finished_ = true;
+  } else if (!jieli_diag_finished_ && vid_pkts == 0 && jieli_stream_requested_ &&
+             now_millis - jieli_last_stream_req_ms_ >= 5000) {
+    if (jieli_diag_1234_fd_ < 0) {
+      jieli_diag_1234_fd_ = open_bound_udp_socket(config_.network_handle, true, 1234);
+      jieli_diag_started_ms_ = now_millis;
+      if (jieli_diag_1234_fd_ < 0) {
+        jieli_diag_finished_ = true;
+      }
+    }
+    if (jieli_diag_1234_fd_ >= 0) {
+      uint8_t d_buf[512];
+      for (int burst = 0; burst < 8; ++burst) {
+        sockaddr_in src{};
+        socklen_t slen = sizeof(src);
+        const ssize_t dn = ::recvfrom(jieli_diag_1234_fd_, d_buf, sizeof(d_buf), 0,
+                                      reinterpret_cast<sockaddr*>(&src), &slen);
+        if (dn <= 0) break;
+        const int32_t cnt = jieli_diag_pkt_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (cnt == 1) {
+          const size_t sample_len = std::min<size_t>(static_cast<size_t>(dn), 24);
+          std::vector<uint8_t> sample(d_buf, d_buf + sample_len);
+          std::lock_guard<std::mutex> lock(hex_mutex_);
+          jieli_diag_sample_hex_ = bytes_to_hex(sample);
+        }
+        if (cnt >= 20) break;
+      }
+      if (jieli_diag_pkt_count_.load(std::memory_order_relaxed) >= 20 ||
+          now_millis - jieli_diag_started_ms_ >= 30000) {
+        ::close(jieli_diag_1234_fd_);
+        jieli_diag_1234_fd_ = -1;
+        jieli_diag_finished_ = true;
+      }
     }
   }
 }
@@ -1201,9 +1326,15 @@ void NativeSession::worker_loop() {
     }
 
     protocol::StickState current_state;
+    bool probe_active = false;
+    uint8_t probe_byte = 9;
+    uint8_t probe_val = 0;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       current_state = stick_state_;
+      probe_active = servo_probe_enabled_;
+      probe_byte = servo_probe_byte_index_;
+      probe_val = servo_probe_hex_value_;
       uint32_t flags = latched_actions_;
       for (auto& slot : active_pulses_) {
         if (slot.ticks_remaining > 0) {
@@ -1241,7 +1372,10 @@ void NativeSession::worker_loop() {
           cooingdv_gl_detected_.load(std::memory_order_relaxed)) {
         encode_family = protocol::Family::COOINGDV_GL;
       }
-      const auto packet = protocol::encode_control_packet(encode_family, current_state);
+      const auto packet =
+          (probe_active && !emergency_active && !is_harness)
+              ? protocol::encode_servo_probe_packet(probe_byte, probe_val)
+              : protocol::encode_control_packet(encode_family, current_state);
       if (!packet.empty()) {
         {
           std::lock_guard<std::mutex> lock(hex_mutex_);
@@ -1277,6 +1411,46 @@ void NativeSession::worker_loop() {
       } else if (config_.family == protocol::Family::LEWEI) {
         poll_lewei_tcp(tms, loop_us);
       } else {
+        // CooingDV Jieli UDP :2228 full CTP startup sequence (APP_ACCESS -> DATE_TIME -> OPEN_RT_STREAM)
+        if (config_.family == protocol::Family::COOINGDV_JIELI && control_fd_ >= 0) {
+          if (!jieli_udp_access_sent_) {
+            const auto acc = protocol::encode_ctp_message(
+                "APP_ACCESS", "{\"op\":\"PUT\",\"param\":{\"type\":\"1\",\"ver\":\"1.0\"}}");
+            if (::sendto(control_fd_, acc.data(), acc.size(), 0,
+                         reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr)) > 0) {
+              packets_sent_.fetch_add(1, std::memory_order_relaxed);
+              jieli_udp_access_sent_ = true;
+            }
+          } else if (!jieli_udp_date_sent_) {
+            const std::time_t t = std::time(nullptr);
+            std::tm tm_now{};
+            localtime_r(&t, &tm_now);
+            char json[96];
+            std::snprintf(json, sizeof(json),
+                          "{\"op\":\"PUT\",\"param\":{\"date\":\"%04d%02d%02d%02d%02d%02d\"}}",
+                          tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
+                          tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
+            const auto dt = protocol::encode_ctp_message("DATE_TIME", json);
+            if (::sendto(control_fd_, dt.data(), dt.size(), 0,
+                         reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr)) > 0) {
+              packets_sent_.fetch_add(1, std::memory_order_relaxed);
+              jieli_udp_date_sent_ = true;
+            }
+          } else if (!jieli_udp_stream_requested_ ||
+                     (video_packets_received_.load(std::memory_order_relaxed) == 0 &&
+                      tms - jieli_udp_last_stream_req_ms_ >= 5000)) {
+            const auto req = protocol::encode_ctp_message(
+                "OPEN_RT_STREAM",
+                "{\"op\":\"PUT\",\"param\":{\"w\":\"640\",\"h\":\"480\",\"fps\":\"25\",\"format\":\"0\"}}");
+            if (::sendto(control_fd_, req.data(), req.size(), 0,
+                         reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr)) > 0) {
+              packets_sent_.fetch_add(1, std::memory_order_relaxed);
+              jieli_udp_stream_requested_ = true;
+              jieli_udp_last_stream_req_ms_ = tms;
+            }
+          }
+        }
+
         // Periodic heartbeat: 200ms for WIFI_UAV; 1000ms for CooingDV / KY Y-series / X69_LG / COOINGDV_JIELI
         const int64_t hb_interval_ms = (config_.family == protocol::Family::WIFI_UAV) ? 200 : 1000;
         if (tms - last_heartbeat_ms_ >= hb_interval_ms) {
@@ -1362,13 +1536,28 @@ void NativeSession::worker_loop() {
               if (parsed.valid_status_flags) {
                 firmware_status_flags_.store(parsed.status_flags, std::memory_order_relaxed);
               }
+              if (parsed.detected_cooingdv_id >= 0) {
+                detected_cooingdv_id_.store(parsed.detected_cooingdv_id, std::memory_order_relaxed);
+              }
               if (parsed.cooingdv_is_gl && config_.family == protocol::Family::COOINGDV) {
                 cooingdv_gl_detected_.store(true, std::memory_order_relaxed);
               }
-              if (parsed.cooingdv_photo_sync || parsed.cooingdv_video_sync) {
-                const uint8_t sync[2] = {0x09, parsed.cooingdv_photo_sync ? uint8_t{0x01} : uint8_t{0x02}};
-                ::sendto(fd, sync, sizeof(sync), 0,
-                         reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr));
+              if (parsed.cooingdv_photo_sync) {
+                const int32_t ctr = parsed.cooingdv_photo_counter;
+                if (ctr < 0 || ctr != last_cooingdv_photo_ctr_) {
+                  last_cooingdv_photo_ctr_ = (ctr >= 0) ? ctr : -2;
+                  const uint8_t sync[2] = {0x09, 0x01};
+                  ::sendto(fd, sync, sizeof(sync), 0,
+                           reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr));
+                }
+              } else if (parsed.cooingdv_video_sync) {
+                const int32_t ctr = parsed.cooingdv_video_counter;
+                if (ctr < 0 || ctr != last_cooingdv_video_ctr_) {
+                  last_cooingdv_video_ctr_ = (ctr >= 0) ? ctr : -2;
+                  const uint8_t sync[2] = {0x09, 0x02};
+                  ::sendto(fd, sync, sizeof(sync), 0,
+                           reinterpret_cast<const sockaddr*>(&control_addr), sizeof(control_addr));
+                }
               }
             } else {
               video_packets_received_.fetch_add(1, std::memory_order_relaxed);

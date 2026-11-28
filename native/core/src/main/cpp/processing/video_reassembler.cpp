@@ -779,7 +779,12 @@ void VideoReassembler::push_udp_packet(const uint8_t* data, size_t len, int64_t 
 
   if (transport_ == TransportKind::RTP_JPEG) {
     if (len >= 12 && ((data[0] >> 6) & 0x03) == 2) {
-      push_rtp_jpeg_packet(data, len, timestamp_us);
+      const uint8_t pt = data[1] & 0x7F;
+      if (pt == 96) {
+        push_rtp_packet(data, len, timestamp_us, false);
+      } else {
+        push_rtp_jpeg_packet(data, len, timestamp_us);
+      }
     } else {
       // Fallback: check complete standalone JPEG datagram (e.g. Jieli UDP 6666 non-RTP JPEG)
       if (len >= 4 && data[0] == 0xFF && data[1] == 0xD8 &&

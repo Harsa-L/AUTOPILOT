@@ -197,4 +197,44 @@ class ProtocolPacketEncoderTest {
     assertEquals(270, cooing.descriptor.defaultAutoRotationDeg)
     assertTrue(cooing.capabilities.supportsCameraSwitch)
   }
+
+  @Test
+  fun `cooingdv light toggle, cooingdv_gl fixed-height bit, and ky headless pulse encode accurately`() {
+    val cooingLight =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.COOINGDV,
+        actionFlags = NativeActionFlags.LIGHT_TOGGLE,
+      )
+    assertEquals(9, cooingLight.size)
+    assertEquals(0x40.toByte(), cooingLight[6])
+    assertEquals(ByteFraming.xorChecksum(cooingLight, 2, 7), cooingLight[7])
+
+    val glFlags =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.COOINGDV_GL,
+        actionFlags = NativeActionFlags.LIGHT_TOGGLE or NativeActionFlags.ALT_HOLD or NativeActionFlags.HEADLESS,
+      )
+    assertEquals(21, glFlags.size)
+    assertEquals(0x10.toByte(), glFlags[7]) // flags1 |= 0x10 light
+    assertEquals(0x03.toByte(), glFlags[8]) // flags2 |= 0x01 headless | 0x02 alt_hold
+    assertEquals(ByteFraming.xorChecksum(glFlags, 3, 19), glFlags[19])
+
+    val kyHeadless =
+      ProtocolPacketEncoder.encodeControlPacket(
+        family = ProtocolFamily.FLOW_KY_Y_SERIES,
+        actionFlags = NativeActionFlags.HEADLESS,
+      )
+    assertEquals(21, kyHeadless.size)
+    assertEquals(0x04.toByte(), kyHeadless[7]) // discrete cmd 0x04 headless
+
+    val cooing = ProtocolCompatibilityRegistry.findById("cooingdv")!!
+    val gl = ProtocolCompatibilityRegistry.findById("cooingdv_gl")!!
+    assertTrue(cooing.capabilities.supportsLightControl)
+    assertTrue(cooing.capabilities.supportsFixedHeightFlag)
+    assertTrue(cooing.capabilities.supportsCooingdvPassword)
+    assertFalse(cooing.capabilities.supportsAltitudeHold)
+    assertTrue(gl.capabilities.supportsLightControl)
+    assertTrue(gl.capabilities.supportsFixedHeightFlag)
+    assertFalse(gl.capabilities.supportsAltitudeHold)
+  }
 }

@@ -1,6 +1,9 @@
 package com.example.input
 
 import androidx.compose.ui.geometry.Offset
+import com.autopilot.flight.trajectory.CleanedTrajectoryPath
+import com.autopilot.flight.trajectory.NormPoint
+import com.autopilot.flight.trajectory.TrajectoryPathProcessor
 import kotlin.math.hypot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -38,6 +41,7 @@ data class AutomationState(
   val spinnerMode: SpinnerMode = SpinnerMode.NONE,
   val trajectoryDrawMode: Boolean = false,
   val pendingTrajectoryPoints: List<Offset> = emptyList(),
+  val cleanedTrajectory: CleanedTrajectoryPath? = null,
   val activeSequenceTitle: String? = null,
   val activeStepLabel: String? = null,
   val stepIndex: Int = 0,
@@ -53,9 +57,9 @@ data class AutomationState(
 
 /**
  * Coordinates phone-side KY UFO / TurboDrone flight automations:
- * - Screen-drawn Trajectory Path sampling & sequential execution
+ * - Screen-drawn Trajectory Path geometry cleaning & capability-gated execution
  * - Continuous Rotation (Yaw) & Lateral (Roll + Yaw Orbit) Spinners
- * - Safe Timed Flight Maneuver Macros
+ * - Safe Timed Flight Maneuver Macros (explicitly manual open-loop pulses)
  * Always yields immediately to manual touch, gamepad, keyboard, or emergency input.
  */
 class FlightAutomationCoordinator(
@@ -163,13 +167,20 @@ class FlightAutomationCoordinator(
   }
 
   fun setPendingTrajectoryPoints(points: List<Offset>) {
-    _state.value = _state.value.copy(pendingTrajectoryPoints = points)
+    val cleaned =
+      TrajectoryPathProcessor.process(points.map { NormPoint(it.x, it.y) })
+    _state.value =
+      _state.value.copy(
+        pendingTrajectoryPoints = points,
+        cleanedTrajectory = cleaned,
+      )
   }
 
   fun clearTrajectory() {
     _state.value =
       _state.value.copy(
         pendingTrajectoryPoints = emptyList(),
+        cleanedTrajectory = null,
         trajectoryDrawMode = false,
       )
   }
@@ -178,11 +189,25 @@ class FlightAutomationCoordinator(
     startSequence(title = preset.title, steps = preset.steps)
   }
 
-  fun executePendingTrajectory(): Boolean {
-    val pts = _state.value.pendingTrajectoryPoints
+  fun executePendingTrajectory(protocolSupportsTrajectory: Boolean = true): Boolean {
+    if (!protocolSupportsTrajectory) return false
+    val cleaned =
+      _state.value.cleanedTrajectory
+        ?: TrajectoryPathProcessor.process(
+          _state.value.pendingTrajectoryPoints.map { NormPoint(it.x, it.y) }
+        )
+    if (!cleaned.isValidForPreview) return false
+    val pts =
+      if (cleaned.waypoints.size >= 2) cleaned.waypoints.map { Offset(it.point.x, it.point.y) }
+      else cleaned.cleanedPoints.map { Offset(it.x, it.y) }
     val steps = buildTrajectorySteps(pts)
     if (steps.isEmpty()) return false
-    _state.value = _state.value.copy(trajectoryDrawMode = false, pendingTrajectoryPoints = emptyList())
+    _state.value =
+      _state.value.copy(
+        trajectoryDrawMode = false,
+        pendingTrajectoryPoints = emptyList(),
+        cleanedTrajectory = null,
+      )
     startSequence(title = "Trajectory Flight", steps = steps)
     return true
   }

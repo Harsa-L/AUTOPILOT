@@ -10,6 +10,10 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.autopilot.designsystem.ThemeAppearanceMode
+import com.autopilot.flight.gravity.GravityPreset
+import com.autopilot.flight.gravity.GravityResponseCurve
+import com.autopilot.flight.input.StickInputProfile
+import com.autopilot.flight.touch.JoystickMode
 import com.autopilot.video.MvFilterPreset
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -50,6 +54,28 @@ data class AutopilotUserPrefs(
   val keyboardEnabled: Boolean = true,
   val gravityMaxAngleDeg: Float = 25f,
   val spinnerSpeedRatio: Float = 0.42f,
+  val stickInputProfile: StickInputProfile = StickInputProfile.FIXED_STICKS,
+  val atcJoystickMode: JoystickMode = JoystickMode.FLOATING,
+  val atcSensitivity: Float = 1.0f,
+  val atcDeadzone: Float = 0.06f,
+  val atcMaxTravelDp: Float = 56f,
+  val atcOpacity: Float = 0.85f,
+  val atcInvertThrottle: Boolean = false,
+  val atcInvertPitch: Boolean = false,
+  val atcInvertRoll: Boolean = false,
+  val atcInvertYaw: Boolean = false,
+  val atcSwapZones: Boolean = false,
+  val gravityPreset: GravityPreset = GravityPreset.NORMAL,
+  val gravityCurve: GravityResponseCurve = GravityResponseCurve.PROGRESSIVE_EXPO,
+  val gravitySensitivityPitch: Float = 1.0f,
+  val gravitySensitivityRoll: Float = 1.0f,
+  val gravityDeadzoneDeg: Float = 4.0f,
+  val gravitySmoothingAlpha: Float = 0.38f,
+  val gravitySlewRatePerSec: Float = 3.5f,
+  val allowExperimentalFlightCommands: Boolean = false,
+  val opticalFlowHoverAssistEnabled: Boolean = false,
+  val hudLayoutPortraitJson: String = "",
+  val hudLayoutLandscapeJson: String = "",
 )
 
 class UserPreferencesStore(private val context: Context) {
@@ -87,6 +113,28 @@ class UserPreferencesStore(private val context: Context) {
     val KEYBOARD_ENABLED = booleanPreferencesKey("keyboard_enabled")
     val GRAVITY_MAX_ANGLE = floatPreferencesKey("gravity_max_angle_deg")
     val SPINNER_SPEED_RATIO = floatPreferencesKey("spinner_speed_ratio")
+    val STICK_INPUT_PROFILE = stringPreferencesKey("stick_input_profile")
+    val ATC_JOYSTICK_MODE = stringPreferencesKey("atc_joystick_mode")
+    val ATC_SENSITIVITY = floatPreferencesKey("atc_sensitivity")
+    val ATC_DEADZONE = floatPreferencesKey("atc_deadzone")
+    val ATC_MAX_TRAVEL_DP = floatPreferencesKey("atc_max_travel_dp")
+    val ATC_OPACITY = floatPreferencesKey("atc_opacity")
+    val ATC_INVERT_THROTTLE = booleanPreferencesKey("atc_invert_throttle")
+    val ATC_INVERT_PITCH = booleanPreferencesKey("atc_invert_pitch")
+    val ATC_INVERT_ROLL = booleanPreferencesKey("atc_invert_roll")
+    val ATC_INVERT_YAW = booleanPreferencesKey("atc_invert_yaw")
+    val ATC_SWAP_ZONES = booleanPreferencesKey("atc_swap_zones")
+    val GRAVITY_PRESET = stringPreferencesKey("gravity_preset")
+    val GRAVITY_CURVE = stringPreferencesKey("gravity_curve")
+    val GRAVITY_SENS_PITCH = floatPreferencesKey("gravity_sens_pitch")
+    val GRAVITY_SENS_ROLL = floatPreferencesKey("gravity_sens_roll")
+    val GRAVITY_DEADZONE_DEG = floatPreferencesKey("gravity_deadzone_deg")
+    val GRAVITY_SMOOTHING = floatPreferencesKey("gravity_smoothing")
+    val GRAVITY_SLEW_RATE = floatPreferencesKey("gravity_slew_rate")
+    val ALLOW_EXPERIMENTAL_FLIGHT = booleanPreferencesKey("allow_experimental_flight")
+    val OPTICAL_FLOW_HOVER_ASSIST = booleanPreferencesKey("optical_flow_hover_assist")
+    val HUD_LAYOUT_PORTRAIT_JSON = stringPreferencesKey("hud_layout_portrait_json")
+    val HUD_LAYOUT_LANDSCAPE_JSON = stringPreferencesKey("hud_layout_landscape_json")
   }
 
   val preferences: Flow<AutopilotUserPrefs> =
@@ -98,6 +146,20 @@ class UserPreferencesStore(private val context: Context) {
       val mvName = prefs[Keys.MV_FILTER_PRESET] ?: MvFilterPreset.NATURAL.name
       val mv =
         runCatching { MvFilterPreset.valueOf(mvName) }.getOrDefault(MvFilterPreset.NATURAL)
+      val stickProfileName = prefs[Keys.STICK_INPUT_PROFILE] ?: StickInputProfile.FIXED_STICKS.name
+      val stickProfile =
+        runCatching { StickInputProfile.valueOf(stickProfileName) }
+          .getOrDefault(StickInputProfile.FIXED_STICKS)
+      val atcJoyName = prefs[Keys.ATC_JOYSTICK_MODE] ?: JoystickMode.FLOATING.name
+      val atcJoystickMode =
+        runCatching { JoystickMode.valueOf(atcJoyName) }.getOrDefault(JoystickMode.FLOATING)
+      val gravityPresetName = prefs[Keys.GRAVITY_PRESET] ?: GravityPreset.NORMAL.name
+      val gravityPreset =
+        runCatching { GravityPreset.valueOf(gravityPresetName) }.getOrDefault(GravityPreset.NORMAL)
+      val gravityCurveName = prefs[Keys.GRAVITY_CURVE] ?: GravityResponseCurve.PROGRESSIVE_EXPO.name
+      val gravityCurve =
+        runCatching { GravityResponseCurve.valueOf(gravityCurveName) }
+          .getOrDefault(GravityResponseCurve.PROGRESSIVE_EXPO)
       AutopilotUserPrefs(
         activeThemeId = prefs[Keys.ACTIVE_THEME_ID] ?: "system_adaptive",
         appearanceMode = mode,
@@ -131,6 +193,28 @@ class UserPreferencesStore(private val context: Context) {
         keyboardEnabled = prefs[Keys.KEYBOARD_ENABLED] ?: true,
         gravityMaxAngleDeg = prefs[Keys.GRAVITY_MAX_ANGLE] ?: 25f,
         spinnerSpeedRatio = prefs[Keys.SPINNER_SPEED_RATIO] ?: 0.42f,
+        stickInputProfile = stickProfile,
+        atcJoystickMode = atcJoystickMode,
+        atcSensitivity = prefs[Keys.ATC_SENSITIVITY] ?: 1.0f,
+        atcDeadzone = prefs[Keys.ATC_DEADZONE] ?: 0.06f,
+        atcMaxTravelDp = prefs[Keys.ATC_MAX_TRAVEL_DP] ?: 56f,
+        atcOpacity = prefs[Keys.ATC_OPACITY] ?: 0.85f,
+        atcInvertThrottle = prefs[Keys.ATC_INVERT_THROTTLE] ?: false,
+        atcInvertPitch = prefs[Keys.ATC_INVERT_PITCH] ?: false,
+        atcInvertRoll = prefs[Keys.ATC_INVERT_ROLL] ?: false,
+        atcInvertYaw = prefs[Keys.ATC_INVERT_YAW] ?: false,
+        atcSwapZones = prefs[Keys.ATC_SWAP_ZONES] ?: false,
+        gravityPreset = gravityPreset,
+        gravityCurve = gravityCurve,
+        gravitySensitivityPitch = prefs[Keys.GRAVITY_SENS_PITCH] ?: 1.0f,
+        gravitySensitivityRoll = prefs[Keys.GRAVITY_SENS_ROLL] ?: 1.0f,
+        gravityDeadzoneDeg = prefs[Keys.GRAVITY_DEADZONE_DEG] ?: 4.0f,
+        gravitySmoothingAlpha = prefs[Keys.GRAVITY_SMOOTHING] ?: 0.38f,
+        gravitySlewRatePerSec = prefs[Keys.GRAVITY_SLEW_RATE] ?: 3.5f,
+        allowExperimentalFlightCommands = prefs[Keys.ALLOW_EXPERIMENTAL_FLIGHT] ?: false,
+        opticalFlowHoverAssistEnabled = prefs[Keys.OPTICAL_FLOW_HOVER_ASSIST] ?: false,
+        hudLayoutPortraitJson = prefs[Keys.HUD_LAYOUT_PORTRAIT_JSON] ?: "",
+        hudLayoutLandscapeJson = prefs[Keys.HUD_LAYOUT_LANDSCAPE_JSON] ?: "",
       )
     }
 
@@ -238,6 +322,67 @@ class UserPreferencesStore(private val context: Context) {
       prefs[Keys.SOFT_DESCENT_ASSIST] = softDescentAssistEnabled
       prefs[Keys.GRAVITY_MAX_ANGLE] = gravityMaxAngleDeg.coerceIn(10f, 45f)
       prefs[Keys.SPINNER_SPEED_RATIO] = spinnerSpeedRatio.coerceIn(0.18f, 0.75f)
+    }
+  }
+
+  suspend fun updateAtcAndGravityAdvancedPrefs(
+    stickInputProfile: StickInputProfile,
+    atcSensitivity: Float,
+    atcDeadzone: Float,
+    atcMaxTravelDp: Float,
+    atcOpacity: Float,
+    atcInvertThrottle: Boolean,
+    atcInvertPitch: Boolean,
+    atcSwapZones: Boolean,
+    gravityPreset: GravityPreset,
+    gravityCurve: GravityResponseCurve,
+    gravitySensitivityPitch: Float,
+    gravitySensitivityRoll: Float,
+    gravityDeadzoneDeg: Float,
+    gravitySmoothingAlpha: Float,
+    gravitySlewRatePerSec: Float,
+    atcJoystickMode: JoystickMode = JoystickMode.FLOATING,
+    atcInvertRoll: Boolean = false,
+    atcInvertYaw: Boolean = false,
+  ) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.STICK_INPUT_PROFILE] = stickInputProfile.name
+      prefs[Keys.ATC_JOYSTICK_MODE] = atcJoystickMode.name
+      prefs[Keys.ATC_SENSITIVITY] = atcSensitivity.coerceIn(0.4f, 1.5f)
+      prefs[Keys.ATC_DEADZONE] = atcDeadzone.coerceIn(0f, 0.25f)
+      prefs[Keys.ATC_MAX_TRAVEL_DP] = atcMaxTravelDp.coerceIn(36f, 96f)
+      prefs[Keys.ATC_OPACITY] = atcOpacity.coerceIn(0.4f, 1.0f)
+      prefs[Keys.ATC_INVERT_THROTTLE] = atcInvertThrottle
+      prefs[Keys.ATC_INVERT_PITCH] = atcInvertPitch
+      prefs[Keys.ATC_INVERT_ROLL] = atcInvertRoll
+      prefs[Keys.ATC_INVERT_YAW] = atcInvertYaw
+      prefs[Keys.ATC_SWAP_ZONES] = atcSwapZones
+      prefs[Keys.GRAVITY_PRESET] = gravityPreset.name
+      prefs[Keys.GRAVITY_CURVE] = gravityCurve.name
+      prefs[Keys.GRAVITY_SENS_PITCH] = gravitySensitivityPitch.coerceIn(0.4f, 1.5f)
+      prefs[Keys.GRAVITY_SENS_ROLL] = gravitySensitivityRoll.coerceIn(0.4f, 1.5f)
+      prefs[Keys.GRAVITY_DEADZONE_DEG] = gravityDeadzoneDeg.coerceIn(1f, 12f)
+      prefs[Keys.GRAVITY_SMOOTHING] = gravitySmoothingAlpha.coerceIn(0.10f, 0.90f)
+      prefs[Keys.GRAVITY_SLEW_RATE] = gravitySlewRatePerSec.coerceIn(1.0f, 8.0f)
+    }
+  }
+
+  suspend fun updateExperimentalFlightAllowed(allowed: Boolean) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.ALLOW_EXPERIMENTAL_FLIGHT] = allowed
+    }
+  }
+
+  suspend fun updateHoverAssistEnabled(enabled: Boolean) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.OPTICAL_FLOW_HOVER_ASSIST] = enabled
+    }
+  }
+
+  suspend fun updateHudLayouts(portraitJson: String, landscapeJson: String) {
+    context.autopilotPrefsDataStore.edit { prefs ->
+      prefs[Keys.HUD_LAYOUT_PORTRAIT_JSON] = portraitJson
+      prefs[Keys.HUD_LAYOUT_LANDSCAPE_JSON] = landscapeJson
     }
   }
 }

@@ -134,6 +134,25 @@ class NativeDroneProtocolAdapter(
     }
   }
 
+  override fun setServoProbe(enabled: Boolean, byteIndex: Int, hexValue: Int) {
+    val handle = nativeHandle.get()
+    if (handle != 0L && AutopilotNativeBridge.isNativeLoaded) {
+      AutopilotNativeBridge.nativeSetServoProbe(handle, enabled, byteIndex, hexValue)
+    }
+  }
+
+  override fun sendCooingdvPassword(digits8: String): Boolean {
+    val handle = nativeHandle.get()
+    if (handle == 0L || !AutopilotNativeBridge.isNativeLoaded) return false
+    return AutopilotNativeBridge.nativeSendCooingdvPassword(handle, digits8)
+  }
+
+  override fun readDiagSummary(): String {
+    val handle = nativeHandle.get()
+    if (handle == 0L || !AutopilotNativeBridge.isNativeLoaded) return ""
+    return AutopilotNativeBridge.nativeReadDiagSummary(handle)
+  }
+
   override suspend fun sendCommand(command: FlightCommand) {
     val handle = nativeHandle.get()
     if (handle == 0L || !AutopilotNativeBridge.isNativeLoaded) return
@@ -264,6 +283,20 @@ class NativeDroneProtocolAdapter(
       }
       FlightCommand.RequestKeyframe -> {
         AutopilotNativeBridge.nativeRequestKeyframe(handle)
+      }
+      FlightCommand.ToggleLight -> {
+        if (capabilities.supportsLightControl) {
+          AutopilotNativeBridge.nativeTriggerAction(handle, NativeActionFlags.LIGHT_TOGGLE)
+        }
+      }
+      is FlightCommand.SetFixedHeightMode -> {
+        if (capabilities.supportsFixedHeightFlag) {
+          AutopilotNativeBridge.nativeSetLatchedAction(
+            handle,
+            NativeActionFlags.ALT_HOLD,
+            command.enabled,
+          )
+        }
       }
     }
   }
@@ -448,7 +481,9 @@ object ProtocolPacketEncoder {
         }
         if ((actionFlags and NativeActionFlags.CALIBRATE_GYRO) != 0) flags1 = flags1 or 0x04
         if ((actionFlags and NativeActionFlags.FLIP_360) != 0) flags1 = flags1 or 0x08
-        val flags2 = if ((actionFlags and NativeActionFlags.HEADLESS) != 0) 0x01 else 0x00
+        if ((actionFlags and NativeActionFlags.LIGHT_TOGGLE) != 0) flags1 = flags1 or 0x10
+        var flags2 = if ((actionFlags and NativeActionFlags.HEADLESS) != 0) 0x01 else 0x00
+        if ((actionFlags and NativeActionFlags.ALT_HOLD) != 0) flags2 = flags2 or 0x02
         ByteArray(21).also {
           it[0] = 0x03
           it[1] = 0x66.toByte()
@@ -594,6 +629,7 @@ object ProtocolPacketEncoder {
     if ((actionFlags and NativeActionFlags.FLIP_360) != 0) out = out or 0x08
     if ((actionFlags and NativeActionFlags.HEADLESS) != 0) out = out or 0x10
     if ((actionFlags and NativeActionFlags.UNLOCK_MOTORS) != 0) out = out or 0x20
+    if ((actionFlags and NativeActionFlags.LIGHT_TOGGLE) != 0) out = out or 0x40
     if ((actionFlags and NativeActionFlags.CALIBRATE_GYRO) != 0) out = out or 0x80
     return out.toByte()
   }

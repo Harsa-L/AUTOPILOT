@@ -69,6 +69,7 @@ static uint8_t map_cooingdv_tc_flags(const StickState& state) {
   if (state.action_flags & ActionFlag::FLIP_360) flags |= 0x08;
   if (state.action_flags & ActionFlag::HEADLESS) flags |= 0x10;
   if (state.action_flags & ActionFlag::UNLOCK_MOTORS) flags |= 0x20;
+  if (state.action_flags & ActionFlag::LIGHT_TOGGLE) flags |= 0x40;
   if (state.action_flags & ActionFlag::CALIBRATE_GYRO) flags |= 0x80;
   return flags;
 }
@@ -219,9 +220,11 @@ std::vector<uint8_t> encode_control_packet(Family family, const StickState& stat
       }
       if (state.action_flags & ActionFlag::CALIBRATE_GYRO) flags1 |= 0x04;
       if (state.action_flags & ActionFlag::FLIP_360) flags1 |= 0x08;
+      if (state.action_flags & ActionFlag::LIGHT_TOGGLE) flags1 |= 0x10;
 
       uint8_t flags2 = 0x00;
       if (state.action_flags & ActionFlag::HEADLESS) flags2 |= 0x01;
+      if (state.action_flags & ActionFlag::ALT_HOLD) flags2 |= 0x02;
 
       std::vector<uint8_t> pkt(21, 0);
       pkt[0] = 0x03;
@@ -435,6 +438,36 @@ std::vector<uint8_t> encode_camera_switch_packet(Family family, int32_t camera_i
   }
 }
 
+std::vector<uint8_t> encode_cooingdv_password_packet(const std::string& digits_8) {
+  if (digits_8.size() != 8) return {};
+  std::vector<uint8_t> pkt(9, 0);
+  pkt[0] = 0x0A;
+  for (size_t i = 0; i < 8; ++i) {
+    const char ch = digits_8[i];
+    if (ch < '0' || ch > '9') return {};
+    pkt[i + 1] = static_cast<uint8_t>(ch - '0');
+  }
+  return pkt;
+}
+
+std::vector<uint8_t> encode_servo_probe_packet(uint8_t byte_index_9_to_18, uint8_t hex_value) {
+  if (byte_index_9_to_18 < 9 || byte_index_9_to_18 > 18) return {};
+  std::vector<uint8_t> pkt(21, 0);
+  pkt[0] = 0x03;
+  pkt[1] = 0x66;
+  pkt[2] = 0x14;
+  pkt[3] = 0x80;
+  pkt[4] = 0x80;
+  pkt[5] = 0x80;
+  pkt[6] = 0x80;
+  pkt[7] = 0x00;
+  pkt[8] = 0x02;
+  pkt[byte_index_9_to_18] = hex_value;
+  pkt[19] = xor_checksum(&pkt[3], 16);
+  pkt[20] = 0x99;
+  return pkt;
+}
+
 RxTelemetryUpdate parse_rx_telemetry(Family family, const uint8_t* data, size_t len) {
   RxTelemetryUpdate out;
   if (!data || len == 0) return out;
@@ -450,8 +483,11 @@ RxTelemetryUpdate parse_rx_telemetry(Family family, const uint8_t* data, size_t 
     }
     if (len >= 3 && data[2] == 0x4D) {
       out.cooingdv_photo_sync = true;
+      out.cooingdv_photo_counter = (len >= 4) ? static_cast<int32_t>(data[3]) : -1;
     } else if (len >= 3 && data[2] == 0x58) {
       out.cooingdv_video_sync = true;
+      out.cooingdv_video_counter = (len >= 5) ? static_cast<int32_t>(data[4])
+                                              : ((len >= 4) ? static_cast<int32_t>(data[3]) : -1);
     }
     return out;
   }

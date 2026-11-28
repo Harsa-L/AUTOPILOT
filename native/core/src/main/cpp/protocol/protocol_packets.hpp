@@ -46,9 +46,11 @@ inline constexpr uint32_t UNLOCK_MOTORS = 1u << 7;
 inline constexpr uint32_t FAST_FLY = 1u << 8;
 inline constexpr uint32_t SD_CAPTURE_PULSE = 1u << 9;
 inline constexpr uint32_t SD_RECORD_LATCH = 1u << 10;
+inline constexpr uint32_t LIGHT_TOGGLE = 1u << 11;
+inline constexpr uint32_t ALT_HOLD = 1u << 12;
 
 inline constexpr uint32_t kLatchedMask =
-    HEADLESS | EMERGENCY_STOP | FAST_FLY | SD_RECORD_LATCH;
+    HEADLESS | EMERGENCY_STOP | FAST_FLY | SD_RECORD_LATCH | ALT_HOLD;
 }  // namespace ActionFlag
 
 struct RxTelemetryUpdate {
@@ -60,6 +62,8 @@ struct RxTelemetryUpdate {
   bool cooingdv_is_gl = false;
   bool cooingdv_photo_sync = false;
   bool cooingdv_video_sync = false;
+  int32_t cooingdv_photo_counter = -1;
+  int32_t cooingdv_video_counter = -1;
 };
 
 inline bool is_video_only_family(Family family) {
@@ -97,6 +101,16 @@ std::vector<uint8_t> encode_stop_packet(Family family);
  * Encodes discrete camera switch packet (e.g. CooingDV 06 01/02 or Jieli SWITCH_CAMERA).
  */
 std::vector<uint8_t> encode_camera_switch_packet(Family family, int32_t camera_index);
+
+/**
+ * Encodes CooingDV 0x0A 8-digit password packet: [0x0A, d0..d7]. Returns empty if invalid.
+ */
+std::vector<uint8_t> encode_cooingdv_password_packet(const std::string& digits_8);
+
+/**
+ * Encodes ground-only 21-byte CooingDV/FLOW-UFO servo probe packet setting byte_index [9..18].
+ */
+std::vector<uint8_t> encode_servo_probe_packet(uint8_t byte_index_9_to_18, uint8_t hex_value);
 
 /**
  * Encodes Jieli CTP framing: "CTP:" + u16_le(topic_len) + topic + u32_le(json_len) + json.

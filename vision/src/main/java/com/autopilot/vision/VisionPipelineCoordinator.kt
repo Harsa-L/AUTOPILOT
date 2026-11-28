@@ -235,6 +235,11 @@ class VisionPipelineCoordinator(
       idx += 11
     }
 
+    val rotOmega = if (idx < packed.size) packed[idx++] else 0f
+    val validFlowCount =
+      if (idx < packed.size) packed[idx].toInt().coerceAtLeast(0)
+      else flows.count { it.confidence > 0.1f }
+
     return VisionFrameResult(
       timestampMs = System.currentTimeMillis(),
       detectorAvailability = _availability.value,
@@ -244,6 +249,8 @@ class VisionPipelineCoordinator(
       flowVectors = flows,
       trackedTargets = tracks,
       isSyntheticInput = isSynthetic,
+      rotationalYawOmega = rotOmega,
+      validFlowCount = validFlowCount,
     )
   }
 
